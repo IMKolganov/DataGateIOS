@@ -4,10 +4,13 @@
 //
 
 import SwiftUI
+import NetworkExtension
 
 struct HomeView: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(AppState.self) private var appState
     @State private var connectionState: ConnectionState = .disconnected
+    @State private var vpnViewModel = VPNConnectionViewModel()
     
     enum ConnectionState {
         case disconnected
@@ -53,9 +56,16 @@ struct HomeView: View {
                         .font(AppTypography.statusTitle)
                         .foregroundColor(.primary)
                     
-                    Text("Ready to connect")
-                        .font(AppTypography.statusSubtitle)
-                        .foregroundColor(.secondary)
+                    if let error = vpnViewModel.connectionError {
+                        Text(error)
+                            .font(AppTypography.statusSubtitle)
+                            .foregroundColor(.red)
+                            .lineLimit(2)
+                    } else {
+                        Text("Ready to connect")
+                            .font(AppTypography.statusSubtitle)
+                            .foregroundColor(.secondary)
+                    }
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 20)
@@ -69,9 +79,95 @@ struct HomeView: View {
                 
                 Spacer()
                 
+                // Extension Logs Section - Always show if there are logs or errors
+                if !vpnViewModel.extensionLogs.isEmpty || vpnViewModel.connectionError != nil {
+                    VStack(spacing: 8) {
+                        // Toggle button for logs
+                        Button {
+                            vpnViewModel.toggleLogs()
+                        } label: {
+                            HStack {
+                                Image(systemName: vpnViewModel.showLogs ? "chevron.down" : "chevron.up")
+                                    .font(.system(size: 12, weight: .medium))
+                                Text("Extension Logs (\(vpnViewModel.extensionLogs.count))")
+                                    .font(.system(size: 14, weight: .medium))
+                                Spacer()
+                                if vpnViewModel.showLogs {
+                                    Button {
+                                        Task {
+                                            await vpnViewModel.refreshLogs()
+                                        }
+                                    } label: {
+                                        Image(systemName: "arrow.clockwise")
+                                            .font(.system(size: 12, weight: .medium))
+                                    }
+                                }
+                            }
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                        }
+                        .buttonStyle(.plain)
+                        
+                        // Logs content
+                        if vpnViewModel.showLogs {
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    if vpnViewModel.extensionLogs.isEmpty {
+                                        Text("No logs available")
+                                            .font(.system(size: 12))
+                                            .foregroundColor(.secondary)
+                                            .padding()
+                                    } else {
+                                        ForEach(Array(vpnViewModel.extensionLogs.enumerated()), id: \.offset) { index, log in
+                                            Text(log)
+                                                .font(.system(size: 11, design: .monospaced))
+                                                .foregroundColor(.secondary)
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                                .padding(.horizontal, 12)
+                                                .padding(.vertical, 4)
+                                                .background(
+                                                    index % 2 == 0 ? Color.clear : Color(.systemGray6).opacity(0.5)
+                                                )
+                                        }
+                                    }
+                                }
+                            }
+                            .frame(maxHeight: 200)
+                            .background(Color(.systemGray6))
+                            .cornerRadius(8)
+                            .padding(.horizontal, 20)
+                        }
+                    }
+                    .padding(.bottom, 20)
+                }
+                
                 // Connect Button
                 Button {
-                    // TODO: Connect logic
+                    print("🔘 [HomeView] Connect button tapped")
+                    Task {
+                        if vpnViewModel.isConnected {
+                            print("🔌 [HomeView] Disconnecting...")
+                            await vpnViewModel.disconnect()
+                        } else {
+                            print("🔌 [HomeView] Connecting...")
+                            // Use test config for now
+                            await vpnViewModel.connectWithTestConfig()
+                            
+                            // Check status after a delay
+                            try? await Task.sleep(nanoseconds: 3_000_000_000) // 3 seconds
+                            await vpnViewModel.updateConnectionStatus()
+                            
+                            // Refresh logs after connection attempt - wait a bit for Extension to log
+                            try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
+                            await vpnViewModel.refreshLogs()
+                            
+                            // Auto-show logs if there are any
+                            if !vpnViewModel.extensionLogs.isEmpty {
+                                vpnViewModel.showLogs = true
+                            }
+                        }
+                    }
                 } label: {
                     let mainColor = connectionState.mainColor(for: colorScheme)
                     let bgColor = connectionState.backgroundColor(for: colorScheme)
@@ -105,11 +201,17 @@ struct HomeView: View {
                             
                             // Power icon and text (smaller to fit inside inner circle)
                             VStack(spacing: 8) {
-                                Image(systemName: "power")
-                                    .font(.system(size: 56, weight: .medium))
-                                    .foregroundColor(.white)
+                                if vpnViewModel.isConnecting {
+                                    ProgressView()
+                                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                                        .scaleEffect(1.5)
+                                } else {
+                                    Image(systemName: vpnViewModel.isConnected ? "power" : "power")
+                                        .font(.system(size: 56, weight: .medium))
+                                        .foregroundColor(.white)
+                                }
                                 
-                                Text("Connect")
+                                Text(vpnViewModel.isConnected ? "Disconnect" : vpnViewModel.isConnecting ? "Connecting..." : "Connect")
                                     .font(AppTypography.buttonLarge)
                                     .foregroundColor(.white)
                             }
@@ -125,6 +227,27 @@ struct HomeView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
+            .task {
+                vpnViewModel.startObserving()
+                // Update connection state based on VPN status
+                updateConnectionState()
+            }
+            .onChange(of: vpnViewModel.connectionStatus) { _, _ in
+                updateConnectionState()
+            }
+        }
+    }
+    
+    private func updateConnectionState() {
+        switch vpnViewModel.connectionStatus {
+        case .connected:
+            connectionState = .connected
+        case .connecting, .reasserting:
+            connectionState = .connecting
+        case .disconnected, .disconnecting, .invalid:
+            connectionState = .disconnected
+        @unknown default:
+            connectionState = .disconnected
         }
     }
 }

@@ -41,7 +41,10 @@ struct OverviewSeriesResponse: Decodable {
     }
 }
 
-struct OverviewMetaDto: Decodable {
+// Mark as Sendable to allow use in nonisolated contexts (URLSession completion handlers)
+extension OverviewSeriesResponse: Sendable {}
+
+struct OverviewMetaDto: Decodable, Sendable {
     let from: String
     let to: String
     let grouping: String
@@ -67,7 +70,7 @@ struct OverviewMetaDto: Decodable {
     }
 }
 
-struct OverviewSummaryDto: Decodable {
+struct OverviewSummaryDto: Decodable, Sendable {
     let totalTrafficInBytes: Int64
     let totalTrafficOutBytes: Int64
     let peakActiveClients: Int
@@ -79,7 +82,7 @@ struct OverviewSummaryDto: Decodable {
     }
 }
 
-struct OverviewSeriesRowDto: Decodable {
+struct OverviewSeriesRowDto: Decodable, Sendable {
     let ts: String
     let activeClients: Int
     let trafficInBytes: Int64

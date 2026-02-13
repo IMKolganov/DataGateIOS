@@ -105,11 +105,19 @@ final class StatisticsService {
                     return
                 }
                 
-                let apiResponse = try JSONDecoder().decode(ApiResponse<OverviewSeriesResponse>.self, from: data)
-                if let responseData = apiResponse.data {
-                    completion(.success(responseData))
-                } else {
-                    completion(.failure(NSError(domain: "StatisticsService", code: -1, userInfo: [NSLocalizedDescriptionKey: "No data in response"])))
+                // Decode in MainActor context to satisfy Swift 6 concurrency requirements
+                let decoder = JSONDecoder()
+                Task { @MainActor in
+                    do {
+                        let apiResponse = try decoder.decode(ApiResponse<OverviewSeriesResponse>.self, from: data)
+                        if let responseData = apiResponse.data {
+                            completion(.success(responseData))
+                        } else {
+                            completion(.failure(NSError(domain: "StatisticsService", code: -1, userInfo: [NSLocalizedDescriptionKey: "No data in response"])))
+                        }
+                    } catch {
+                        completion(.failure(error))
+                    }
                 }
             } catch {
                 completion(.failure(error))

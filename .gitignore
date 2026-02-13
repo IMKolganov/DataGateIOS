@@ -5,6 +5,9 @@
 ## Build generated
 build/
 DerivedData/
+*.o
+*.c.o
+build-mbedtls/
 
 ## Various settings
 *.pbxuser
@@ -84,6 +87,13 @@ iOSInjectionProject/
 # Configuration files with secrets
 Config.plist
 DataGateIOS/Config.plist
+
+# OpenVPN test config (load from file; add test-config.ovpn to Xcode target locally)
+test-config.ovpn
+*.ovpn
+
+# mbedTLS prebuilt libraries (build with update_mbedtls.sh)
+DataGateVPNExtension/libs/
 
 # macOS
 .DS_Store

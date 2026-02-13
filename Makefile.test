@@ -1,0 +1,34 @@
+# Makefile для компиляции тестов на Linux
+
+# Пути к библиотекам (измените под вашу систему)
+MBEDTLS_INCLUDE ?= /usr/include
+MBEDTLS_LIB ?= /usr/lib/x86_64-linux-gnu
+
+# Или если используете библиотеки из проекта
+# MBEDTLS_INCLUDE = ./DataGateVPNExtension/mbedtls-include
+# MBEDTLS_LIB = ./DataGateVPNExtension/libs
+
+CXX = g++
+CXXFLAGS = -std=c++11 -Wall -Wextra -O2
+LDFLAGS = -lmbedtls -lmbedx509 -lmbedcrypto
+
+# Тест парсинга через mbedTLS
+test_mbedtls_parse: test_mbedtls_parse.cpp
+	$(CXX) $(CXXFLAGS) -I$(MBEDTLS_INCLUDE) -o $@ $< -L$(MBEDTLS_LIB) $(LDFLAGS)
+
+# Тест парсинга через OpenVPN3 (если библиотека доступна)
+test_openvpn3_parse: test_openvpn3_parse.cpp
+	@echo "Note: Requires OpenVPN3 library to be built first"
+	@echo "Update OPENVPN3_INCLUDE and OPENVPN3_LIB paths"
+	# $(CXX) $(CXXFLAGS) -I$(OPENVPN3_INCLUDE) -o $@ $< -L$(OPENVPN3_LIB) -lovpncli $(LDFLAGS)
+
+# Установка зависимостей на Ubuntu/Debian
+install-deps:
+	sudo apt-get update
+	sudo apt-get install -y build-essential cmake git libmbedtls-dev
+
+# Очистка
+clean:
+	rm -f test_mbedtls_parse test_openvpn3_parse *.o
+
+.PHONY: clean install-deps

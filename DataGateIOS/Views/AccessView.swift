@@ -4,6 +4,7 @@
 //
 
 import SwiftUI
+import NetworkExtension
 
 struct AccessView: View {
     @Environment(AppState.self) private var appState
@@ -99,6 +100,8 @@ struct AccessView: View {
 
 struct ServerRowView: View {
     let server: OpenVpnServerWithStatusDto
+    @State private var vpnViewModel = VPNConnectionViewModel()
+    @Environment(AppState.self) private var appState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -140,11 +143,38 @@ struct ServerRowView: View {
                     .font(AppTypography.caption)
                     .foregroundStyle(.secondary)
             }
+            
+            // Connect button
+            Button {
+                Task {
+                    // Use test config for now (temporary)
+                    await vpnViewModel.connectWithTestConfig()
+                }
+            } label: {
+                HStack {
+                    if vpnViewModel.isConnecting {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle())
+                    }
+                    Text(vpnViewModel.isConnected ? "Disconnect" : "Connect")
+                        .font(AppTypography.button)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(vpnViewModel.isConnected ? Color.red : Color.blue)
+                .foregroundColor(.white)
+                .cornerRadius(8)
+            }
+            .disabled(vpnViewModel.isConnecting)
+            .padding(.top, 8)
         }
         .padding(16)
         .background(Color(.systemBackground))
         .cornerRadius(12)
         .shadow(color: Color.black.opacity(0.05), radius: 4, x: 0, y: 2)
+        .task {
+            vpnViewModel.startObserving()
+        }
     }
 
     private func formatUptime(from date: Date?) -> String {
