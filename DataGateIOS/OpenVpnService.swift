@@ -175,10 +175,7 @@ final class OpenVpnService {
     
     /// Connect using test config loaded from external file (test-config.ovpn in app bundle)
     func connectWithTestConfig() async throws {
-        print("🧪 [OpenVpnService] Loading test config from file...")
         let loaded = try VPNTestConfig.loadTestConfig()
-        print("🧪 [OpenVpnService] Using test config: \(loaded.serverAddress):\(loaded.serverPort) \(loaded.protocolType)")
-
         do {
             try await vpnManager.configureVPN(
                 serverAddress: loaded.serverAddress,
@@ -187,17 +184,12 @@ final class OpenVpnService {
                 ovpnConfigContent: loaded.content
             )
             
-            print("⏳ [OpenVpnService] Waiting before connect...")
             try await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
             
             try await vpnManager.connect()
-            print("✅ [OpenVpnService] Connect command completed")
         } catch {
-            print("❌ [OpenVpnService] Error: \(error.localizedDescription)")
             if let nsError = error as NSError? {
-                print("   Domain: \(nsError.domain)")
-                print("   Code: \(nsError.code)")
-                print("   UserInfo: \(nsError.userInfo)")
+                _ = (nsError.domain, nsError.code, nsError.userInfo)
             }
             throw error
         }

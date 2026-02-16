@@ -36,6 +36,9 @@
 #include <vector>
 #include <mutex>
 
+// Set to 1 to enable per-packet and callback verbose logs (very noisy)
+#define VPN_VERBOSE_PACKET_LOGS 0
+
 // Debug: parse IPv4 header and return "src -> dst proto=N" (nil if not IPv4 or too short)
 static NSString* _tunnelDebugIPv4Summary(NSData *data) {
     if (!data || data.length < 20) return nil;
@@ -651,23 +654,19 @@ public:
             // Create weak reference to avoid retain cycle in recursive calls
             __weak void (^weakReadingHandler)(NSArray<NSData *> *, NSArray<NSNumber *> *) = readingHandler;
             
-            // CRITICAL: Log immediately at the start of handler
+#if VPN_VERBOSE_PACKET_LOGS
             NSTimeInterval handlerTime = [[NSDate date] timeIntervalSince1970];
             NSString *handlerThread = [NSString stringWithFormat:@"%@", [NSThread currentThread].name ?: @"unnamed"];
             NSString *handlerEntryMsg = [NSString stringWithFormat:@"[IOSOpenVPNClient] 📥 readingHandler ENTERED: packets=%lu, protocols=%lu, thread=%@, timestamp=%.6f", 
                                         (unsigned long)packets.count, (unsigned long)protocols.count, handlerThread, handlerTime];
             NSLog(@"%@", handlerEntryMsg);
-            printf("%s\n", [handlerEntryMsg UTF8String]);
             saveLogToUserDefaults("INFO", [handlerEntryMsg UTF8String]);
-            
-            // DIAGNOSTIC: Check if handler is called on correct thread
             CFRunLoopRef handlerRunLoop = CFRunLoopGetCurrent();
             NSString *handlerRunLoopInfo = [NSString stringWithFormat:@"[IOSOpenVPNClient] 🔍 Handler run loop: %p, isMainThread=%d", 
                                            handlerRunLoop, [NSThread isMainThread]];
             NSLog(@"%@", handlerRunLoopInfo);
-            printf("%s\n", [handlerRunLoopInfo UTF8String]);
             saveLogToUserDefaults("INFO", [handlerRunLoopInfo UTF8String]);
-            
+#endif
             IOSOpenVPNClient *strongSelf = weakSelf;
             if (!strongSelf) {
                 NSLog(@"[IOSOpenVPNClient] ⚠️ readingHandler: strongSelf is null");
@@ -682,27 +681,15 @@ public:
                 return;
             }
             
-            // Write packets to OpenVPN3 socket
-            // iOS packetFlow provides data WITHOUT prefix, but with protocol in separate array
-            // OpenVPN3 expects data WITH 4-byte protocol prefix (like OpenVPNPacket.vpnData format)
-            if (packets.count > 0) {
-                NSString *logMsg = [NSString stringWithFormat:@"[IOSOpenVPNClient] 📥 Received %lu packet(s) from packetFlow", (unsigned long)packets.count];
-                NSLog(@"%@", logMsg);
-                printf("%s\n", [logMsg UTF8String]);
-                saveLogToUserDefaults("INFO", [logMsg UTF8String]);
-            }
-            
             for (NSUInteger i = 0; i < packets.count && i < protocols.count; i++) {
                 @try {
                     NSData *packetData = packets[i];
                     NSNumber *protocolFamily = protocols[i];
-                    
+#if VPN_VERBOSE_PACKET_LOGS
                     NSString *packetInfo = [NSString stringWithFormat:@"[IOSOpenVPNClient] 🔍 Processing packet[%lu]: length=%lu, protocol=%@", 
                                             (unsigned long)i, (unsigned long)packetData.length, protocolFamily];
                     NSLog(@"%@", packetInfo);
-                    printf("%s\n", [packetInfo UTF8String]);
                     saveLogToUserDefaults("INFO", [packetInfo UTF8String]);
-                    // TUNNEL DEBUG: first 5 packets FROM device — видно, шлёт ли iOS трафик в туннель и куда
                     if (i < 5 && packetData.length >= 20) {
                         NSString *sum = _tunnelDebugIPv4Summary(packetData);
                         if (sum.length) {
@@ -710,6 +697,7 @@ public:
                             saveLogToUserDefaults("INFO", [msg UTF8String]);
                         }
                     }
+#endif
                     if (packetData.length == 0) {
                         NSLog(@"[IOSOpenVPNClient] ⚠️ Skipping empty packet[%lu]", (unsigned long)i);
                         continue;
@@ -723,12 +711,12 @@ public:
                     [vpnData appendBytes:&protocolPrefix length:4];
                     [vpnData appendData:packetData];
                     
+#if VPN_VERBOSE_PACKET_LOGS
                     NSString *sendInfo = [NSString stringWithFormat:@"[IOSOpenVPNClient] 🔍 About to send packet[%lu] to OpenVPN3: totalSize=%lu, protocol=0x%08x", 
                                          (unsigned long)i, (unsigned long)vpnData.length, protocol];
                     NSLog(@"%@", sendInfo);
-                    printf("%s\n", [sendInfo UTF8String]);
                     saveLogToUserDefaults("INFO", [sendInfo UTF8String]);
-                    
+#endif
                     // Send to OpenVPN3 socket
                     // Use timeout 0.05 like in original OpenVPNAdapter
                     CFSocketError sendResult = CFSocketSendData(strongSelf->openVPNSocket_, NULL, (__bridge CFDataRef)vpnData, 0.05);
@@ -739,19 +727,16 @@ public:
                         printf("%s\n", [errorMsg UTF8String]);
                         saveLogToUserDefaults("WARNING", [errorMsg UTF8String]);
                     } else {
-                            NSString *successMsg = [NSString stringWithFormat:@"[IOSOpenVPNClient] ✅ Successfully sent packet[%lu] to OpenVPN3: %lu bytes", 
-                                               (unsigned long)i, (unsigned long)vpnData.length];
-                        NSLog(@"%@", successMsg);
-                        printf("%s\n", [successMsg UTF8String]);
-                        fflush(stdout); // Force flush
-                        saveLogToUserDefaults("INFO", [successMsg UTF8String]);
-                        // Diagnostic: remember last sent packet (raw IP, no prefix) to detect echo in callback
                         {
                             std::lock_guard<std::mutex> lock(strongSelf->lastSentPacketMutex_);
                             const uint8_t *ptr = (const uint8_t *)packetData.bytes;
                             strongSelf->lastSentPacket_.assign(ptr, ptr + packetData.length);
                         }
-                        // CRITICAL: Force sync after each packet to ensure logs are saved before possible crash
+#if VPN_VERBOSE_PACKET_LOGS
+                        NSString *successMsg = [NSString stringWithFormat:@"[IOSOpenVPNClient] ✅ Successfully sent packet[%lu] to OpenVPN3: %lu bytes", 
+                                               (unsigned long)i, (unsigned long)vpnData.length];
+                        saveLogToUserDefaults("INFO", [successMsg UTF8String]);
+#endif
                         [[NSUserDefaults standardUserDefaults] synchronize];
                     }
                 } @catch (NSException *e) {
@@ -765,66 +750,25 @@ public:
                 }
             }
             
+#if VPN_VERBOSE_PACKET_LOGS
             NSString *loopCompleteMsg = [NSString stringWithFormat:@"[IOSOpenVPNClient] ✅ Finished processing %lu packet(s)", (unsigned long)packets.count];
-            NSLog(@"%@", loopCompleteMsg);
-            printf("%s\n", [loopCompleteMsg UTF8String]);
-            fflush(stdout);
             saveLogToUserDefaults("INFO", [loopCompleteMsg UTF8String]);
-            [[NSUserDefaults standardUserDefaults] synchronize]; // Force sync after loop
-            
-            // Continue reading (recursive call to same handler)
-            // CRITICAL: Must be called on main queue
-            NSString *continueMsg = @"[IOSOpenVPNClient] 🔄 About to continue reading packets (recursive call)";
-            NSLog(@"%@", continueMsg);
-            printf("%s\n", [continueMsg UTF8String]);
-            fflush(stdout);
-            saveLogToUserDefaults("INFO", [continueMsg UTF8String]);
+#endif
             [[NSUserDefaults standardUserDefaults] synchronize];
             
-            // Capture weak reference explicitly to avoid retain cycle
             __weak void (^capturedWeakHandler)(NSArray<NSData *> *, NSArray<NSNumber *> *) = weakReadingHandler;
             dispatch_async(dispatch_get_main_queue(), ^{
                 @try {
-                    NSString *continueOnMainMsg = @"[IOSOpenVPNClient] 🔄 Continuing reading on main queue";
-                    NSLog(@"%@", continueOnMainMsg);
-                    printf("%s\n", [continueOnMainMsg UTF8String]);
-                    fflush(stdout);
-                    saveLogToUserDefaults("INFO", [continueOnMainMsg UTF8String]);
-                    [[NSUserDefaults standardUserDefaults] synchronize];
-                    
                     if (!strongSelf->adapter_ || !strongSelf->adapter_.packetFlow) {
-                        NSString *errorMsg = @"[IOSOpenVPNClient] ⚠️ Cannot continue reading - packetFlow is nil";
-                        NSLog(@"%@", errorMsg);
-                        printf("%s\n", [errorMsg UTF8String]);
-                        fflush(stdout);
-                        saveLogToUserDefaults("WARNING", [errorMsg UTF8String]);
-                        [[NSUserDefaults standardUserDefaults] synchronize];
+#if VPN_VERBOSE_PACKET_LOGS
+                        saveLogToUserDefaults("WARNING", "[IOSOpenVPNClient] ⚠️ Cannot continue reading - packetFlow is nil");
+#endif
                         return;
                     }
-                    
-                    NSString *beforeRecursiveMsg = @"[IOSOpenVPNClient] 🔄 Calling readPacketsWithCompletionHandler recursively";
-                    NSLog(@"%@", beforeRecursiveMsg);
-                    printf("%s\n", [beforeRecursiveMsg UTF8String]);
-                    fflush(stdout);
-                    saveLogToUserDefaults("INFO", [beforeRecursiveMsg UTF8String]);
-                    [[NSUserDefaults standardUserDefaults] synchronize];
-                    
-                    // Use weak reference to avoid retain cycle
                     void (^strongReadingHandler)(NSArray<NSData *> *, NSArray<NSNumber *> *) = capturedWeakHandler;
                     if (strongReadingHandler) {
                         [strongSelf->adapter_.packetFlow readPacketsWithCompletionHandler:strongReadingHandler];
-                    } else {
-                        NSString *errorMsg = @"[IOSOpenVPNClient] ⚠️ Cannot continue reading - readingHandler was deallocated";
-                        NSLog(@"%@", errorMsg);
-                        saveLogToUserDefaults("WARNING", [errorMsg UTF8String]);
                     }
-                    
-                    NSString *afterRecursiveMsg = @"[IOSOpenVPNClient] ✅ Recursive readPacketsWithCompletionHandler called successfully";
-                    NSLog(@"%@", afterRecursiveMsg);
-                    printf("%s\n", [afterRecursiveMsg UTF8String]);
-                    fflush(stdout);
-                    saveLogToUserDefaults("INFO", [afterRecursiveMsg UTF8String]);
-                    [[NSUserDefaults standardUserDefaults] synchronize];
                 } @catch (NSException *e) {
                     NSString *errorMsg = [NSString stringWithFormat:@"[IOSOpenVPNClient] ❌ EXCEPTION in readingHandler continuation: %@, stack=%@", 
                                          e.reason, e.callStackSymbols];
@@ -838,19 +782,15 @@ public:
         };
         #pragma clang diagnostic pop
         
-        // DIAGNOSTIC: Store block pointer for verification
+#if VPN_VERBOSE_PACKET_LOGS
         void *blockPtr = (__bridge void *)readingHandler;
-        NSString *blockInfo = [NSString stringWithFormat:@"[IOSOpenVPNClient] 🔍 Block created: address=%p", blockPtr];
-        NSLog(@"%@", blockInfo);
-        printf("%s\n", [blockInfo UTF8String]);
-        saveLogToUserDefaults("INFO", [blockInfo UTF8String]);
-        
+        saveLogToUserDefaults("INFO", [NSString stringWithFormat:@"[IOSOpenVPNClient] 🔍 Block created: address=%p", blockPtr].UTF8String);
+#endif
         // Start reading
-        NSLog(@"[IOSOpenVPNClient] 📖 Calling readPacketsWithCompletionHandler...");
-        printf("[IOSOpenVPNClient] 📖 Calling readPacketsWithCompletionHandler...\n");
+#if VPN_VERBOSE_PACKET_LOGS
         saveLogToUserDefaults("INFO", "[IOSOpenVPNClient] 📖 Calling readPacketsWithCompletionHandler...");
-        
-        // DIAGNOSTIC: Check if packetFlow is still valid right before call
+#endif
+        // Check if packetFlow is still valid right before call
         if (!adapter_ || !adapter_.packetFlow) {
             NSString *errorMsg = @"[IOSOpenVPNClient] ❌ packetFlow became nil right before readPackets call!";
             NSLog(@"%@", errorMsg);
@@ -864,21 +804,13 @@ public:
         // requires calls on the Extension's main queue
         dispatch_async(dispatch_get_main_queue(), ^{
             @try {
-                // DIAGNOSTIC: Log timestamp before call
+#if VPN_VERBOSE_PACKET_LOGS
                 NSTimeInterval beforeCall = [[NSDate date] timeIntervalSince1970];
-                NSString *beforeCallMsg = [NSString stringWithFormat:@"[IOSOpenVPNClient] 🔍 Before readPackets call (on main queue): timestamp=%.6f, thread=%@", 
-                                          beforeCall, [NSThread currentThread].name ?: @"unnamed"];
-                NSLog(@"%@", beforeCallMsg);
-                printf("%s\n", [beforeCallMsg UTF8String]);
-                saveLogToUserDefaults("INFO", [beforeCallMsg UTF8String]);
-                
-                // DIAGNOSTIC: Verify we're on main queue
-                NSString *queueInfo = [NSString stringWithFormat:@"[IOSOpenVPNClient] 🔍 Queue check: isMainThread=%d, isMainQueue=%d", 
-                                      [NSThread isMainThread], dispatch_queue_get_label(DISPATCH_CURRENT_QUEUE_LABEL) != NULL];
-                NSLog(@"%@", queueInfo);
-                printf("%s\n", [queueInfo UTF8String]);
-                saveLogToUserDefaults("INFO", [queueInfo UTF8String]);
-                
+                saveLogToUserDefaults("INFO", [NSString stringWithFormat:@"[IOSOpenVPNClient] 🔍 Before readPackets call (on main queue): timestamp=%.6f, thread=%@", 
+                                          beforeCall, [NSThread currentThread].name ?: @"unnamed"].UTF8String);
+                saveLogToUserDefaults("INFO", [NSString stringWithFormat:@"[IOSOpenVPNClient] 🔍 Queue check: isMainThread=%d, isMainQueue=%d", 
+                                      [NSThread isMainThread], dispatch_queue_get_label(DISPATCH_CURRENT_QUEUE_LABEL) != NULL].UTF8String);
+#endif
                 if (!adapter_ || !adapter_.packetFlow) {
                     NSString *errorMsg = @"[IOSOpenVPNClient] ❌ packetFlow became nil on main queue!";
                     NSLog(@"%@", errorMsg);
@@ -888,27 +820,14 @@ public:
                 }
                 
                 [adapter_.packetFlow readPacketsWithCompletionHandler:readingHandler];
-            
-                // DIAGNOSTIC: Log timestamp after call (should be immediate)
+#if VPN_VERBOSE_PACKET_LOGS
                 NSTimeInterval afterCall = [[NSDate date] timeIntervalSince1970];
-                NSString *afterCallMsg = [NSString stringWithFormat:@"[IOSOpenVPNClient] 🔍 After readPackets call: timestamp=%.6f, elapsed=%.6f", 
-                                         afterCall, afterCall - beforeCall];
-                NSLog(@"%@", afterCallMsg);
-                printf("%s\n", [afterCallMsg UTF8String]);
-                saveLogToUserDefaults("INFO", [afterCallMsg UTF8String]);
-                
-                NSLog(@"[IOSOpenVPNClient] ✅ readPacketsWithCompletionHandler called successfully (on main queue)");
-                printf("[IOSOpenVPNClient] ✅ readPacketsWithCompletionHandler called successfully (on main queue)\n");
+                saveLogToUserDefaults("INFO", [NSString stringWithFormat:@"[IOSOpenVPNClient] 🔍 After readPackets call: timestamp=%.6f", afterCall].UTF8String);
                 saveLogToUserDefaults("INFO", "[IOSOpenVPNClient] ✅ readPacketsWithCompletionHandler called successfully (on main queue)");
-                
-                // DIAGNOSTIC: Schedule a delayed check to see if handler was called
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    NSString *delayedCheck = @"[IOSOpenVPNClient] 🔍 Delayed check (1s): If handler was called, you should see 'readingHandler ENTERED' above";
-                    NSLog(@"%@", delayedCheck);
-                    printf("%s\n", [delayedCheck UTF8String]);
-                    saveLogToUserDefaults("INFO", [delayedCheck UTF8String]);
+                    saveLogToUserDefaults("INFO", "[IOSOpenVPNClient] 🔍 Delayed check (1s): If handler was called, you should see 'readingHandler ENTERED' above");
                 });
-                
+#endif
             } @catch (NSException *e) {
                 NSString *errorMsg = [NSString stringWithFormat:@"[IOSOpenVPNClient] ❌ EXCEPTION calling readPacketsWithCompletionHandler: %@, stack=%@", 
                                       e.reason, e.callStackSymbols];
@@ -927,16 +846,13 @@ public:
         fflush(stdout);
         [[NSUserDefaults standardUserDefaults] synchronize];
         
-        // Get thread info for debugging
+#if VPN_VERBOSE_PACKET_LOGS
         NSString *threadName = [NSThread isMainThread] ? @"Main" : [NSThread currentThread].name ?: @"Unknown";
         NSTimeInterval timestamp = [[NSDate date] timeIntervalSince1970];
-        
         NSString *entryMsg = [NSString stringWithFormat:@"[IOSOpenVPNClient] 🔔 PacketFlowSocketCallback ENTERED: type=%lu, thread=%@, timestamp=%.6f", 
                               (unsigned long)type, threadName, timestamp];
-        NSLog(@"%@", entryMsg);
-        printf("%s\n", [entryMsg UTF8String]);
-        fflush(stdout);
         saveLogToUserDefaults("INFO", [entryMsg UTF8String]);
+#endif
         [[NSUserDefaults standardUserDefaults] synchronize];
         
         if (type != kCFSocketDataCallBack) {
@@ -1036,14 +952,8 @@ public:
             return;
         }
         
-        NSString *logMsg = [NSString stringWithFormat:@"[IOSOpenVPNClient] 📤 Received packet from OpenVPN3: %lu bytes", (unsigned long)vpnData.length];
-        NSLog(@"%@", logMsg);
-        printf("%s\n", [logMsg UTF8String]);
-        fflush(stdout);
-        saveLogToUserDefaults("INFO", [logMsg UTF8String]);
-        [[NSUserDefaults standardUserDefaults] synchronize];
-        
-        // Diagnostic: log first bytes of payload for first 3 received packets (to confirm what OpenVPN3 writes)
+#if VPN_VERBOSE_PACKET_LOGS
+        saveLogToUserDefaults("INFO", [NSString stringWithFormat:@"[IOSOpenVPNClient] 📤 Received packet from OpenVPN3: %lu bytes", (unsigned long)vpnData.length].UTF8String);
         static int s_receivedFromVPNCount = 0;
         if (s_receivedFromVPNCount < 3 && vpnData.length >= 4) {
             s_receivedFromVPNCount++;
@@ -1061,6 +971,8 @@ public:
                 saveLogToUserDefaults("INFO", [NSString stringWithFormat:@"[TUNNEL DEBUG] FROM_OPENVPN3 #%d: %lu bytes, hex: %@", s_receivedFromVPNCount, (unsigned long)(vpnData.length - 4), hex].UTF8String);
             }
         }
+#endif
+        [[NSUserDefaults standardUserDefaults] synchronize];
         
         // CRITICAL: Extract data IMMEDIATELY - we have a copy now, so it's safe
         uint32_t protocol = 0;
@@ -1148,9 +1060,9 @@ public:
             // This prevents blocking the CFSocket callback and allows run loop to process other events
             // Synchronous writePackets calls can cause deadlocks or crashes when multiple callbacks fire
             // Block automatically retains captured objects (ARC), so packetData and protocolFamily are safe
-            // Capture protocol primitive by value for logging
+#if VPN_VERBOSE_PACKET_LOGS
             uint32_t capturedProtocol = protocol;
-            
+#endif
             dispatch_async(dispatch_get_main_queue(), ^{
                 @autoreleasepool {
                     @try {
@@ -1177,23 +1089,18 @@ public:
                             return;
                         }
                         
-                        // Write packet asynchronously - this prevents blocking the CFSocket callback
                         [client->adapter_.packetFlow writePackets:@[packetData] withProtocols:@[protocolFamily]];
-                        // TUNNEL DEBUG: first 5 packets TO device — что мы отдаём обратно в стек
+#if VPN_VERBOSE_PACKET_LOGS
                         static int s_tunnelDebugWriteCount = 0;
                         s_tunnelDebugWriteCount++;
                         if (s_tunnelDebugWriteCount <= 5 && packetData.length >= 20) {
                             NSString *sum = _tunnelDebugIPv4Summary(packetData);
                             if (sum.length) {
-                                NSString *msg = [NSString stringWithFormat:@"[TUNNEL DEBUG] TO_DEVICE #%d: %@", s_tunnelDebugWriteCount, sum];
-                                saveLogToUserDefaults("INFO", [msg UTF8String]);
+                                saveLogToUserDefaults("INFO", [NSString stringWithFormat:@"[TUNNEL DEBUG] TO_DEVICE #%d: %@", s_tunnelDebugWriteCount, sum].UTF8String);
                             }
                         }
-                        NSString *writeLogMsg = [NSString stringWithFormat:@"[IOSOpenVPNClient] ✅ Wrote packet to packetFlow: %lu bytes, protocol=%u", (unsigned long)packetData.length, capturedProtocol];
-                        NSLog(@"%@", writeLogMsg);
-                        printf("%s\n", [writeLogMsg UTF8String]);
-                        fflush(stdout);
-                        saveLogToUserDefaults("INFO", [writeLogMsg UTF8String]);
+                        saveLogToUserDefaults("INFO", [NSString stringWithFormat:@"[IOSOpenVPNClient] ✅ Wrote packet to packetFlow: %lu bytes, protocol=%u", (unsigned long)packetData.length, (unsigned)capturedProtocol].UTF8String);
+#endif
                         [[NSUserDefaults standardUserDefaults] synchronize];
                     } @catch (NSException *e) {
                         NSString *errorMsg = [NSString stringWithFormat:@"[IOSOpenVPNClient] ❌ EXCEPTION in async writePackets: %@, stack=%@", e.reason, e.callStackSymbols];

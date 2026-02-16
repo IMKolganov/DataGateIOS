@@ -24,7 +24,6 @@ final class VPNConnectionViewModel {
     
     /// Start observing VPN status changes
     func startObserving() {
-        print("👀 [VPNViewModel] Starting to observe VPN status...")
         Task { @MainActor in
             await updateConnectionStatus()
             
@@ -111,86 +110,35 @@ final class VPNConnectionViewModel {
     /// Connect using test config from file (test-config.ovpn in app bundle)
     /// TODO: Remove after testing
     func connectWithTestConfig() async {
-        print("🎯 [VPNViewModel] Connect button pressed")
         isConnecting = true
         connectionError = nil
         extensionLogs = [] // Clear logs on new connection attempt
         lastAppliedTunnelSettings = nil
         
         do {
-            print("🔄 [VPNViewModel] Calling connectWithTestConfig...")
             try await openVpnService.connectWithTestConfig()
-            
-            print("⏳ [VPNViewModel] Waiting before status check...")
             try await Task.sleep(nanoseconds: 2_000_000_000) // 2 seconds
-            
             await updateConnectionStatus()
             let status = connectionStatus
-            print("📊 [VPNViewModel] Final status: \(status.rawValue)")
             
-            // Always fetch logs after connection attempt (load all for first time)
             await loadAllLogs()
             
-            if status == .connected {
-                // Проверка доступности интернета через туннель — результат в лог
-                await checkConnectivityAndLog()
-            } else {
-                print("⚠️ [VPNViewModel] Status is not connected: \(status.rawValue)")
-                
-                // Try to get error from Extension
-                print("📋 [VPNViewModel] Attempting to get Extension error...")
+            if status != .connected {
                 if let extensionError = await getExtensionError() {
-                    print("❌ [VPNViewModel] Extension error retrieved: \(extensionError)")
                     connectionError = extensionError
                 } else {
-                    print("⚠️ [VPNViewModel] No Extension error available")
                     connectionError = "Connection failed. Status: \(statusDescription)"
                 }
             }
         } catch {
-            print("❌ [VPNViewModel] Error: \(error.localizedDescription)")
             connectionError = error.localizedDescription
-            
-            // Fetch logs on error (load all)
-            print("📋 [VPNViewModel] Fetching logs after error...")
             await loadAllLogs()
-            
-            // Also try to get error from Extension for more details
             if let extensionError = await getExtensionError() {
                 connectionError = "\(error.localizedDescription)\nExtension error: \(extensionError)"
             }
         }
         
         isConnecting = false
-        print("🏁 [VPNViewModel] Connect process finished")
-    }
-    
-    /// Проверка доступности интернета после коннекта (трафик через VPN). Результат — в консоль (Xcode).
-    private func checkConnectivityAndLog() async {
-        print("🌐 [Connectivity] Checking internet after VPN connect...")
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 10
-        config.timeoutIntervalForResource = 12
-        let session = URLSession(configuration: config)
-        let urls = ["https://www.apple.com", "https://cloudflare.com"]
-        for urlString in urls {
-            guard let url = URL(string: urlString) else { continue }
-            let start = CFAbsoluteTimeGetCurrent()
-            var result = "FAIL"
-            do {
-                let (_, response) = try await session.data(from: url)
-                if let http = response as? HTTPURLResponse, (200...399).contains(http.statusCode) {
-                    result = "OK \(http.statusCode)"
-                } else {
-                    result = "unexpected response"
-                }
-            } catch {
-                result = error.localizedDescription
-            }
-            let elapsed = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
-            print("🌐 [Connectivity] \(urlString): \(result) (\(elapsed)ms)")
-        }
-        print("🌐 [Connectivity] Done.")
     }
     
     /// Get error from Extension via app message
@@ -210,9 +158,7 @@ final class VPNConnectionViewModel {
     
     /// Update connection status
     func updateConnectionStatus() async {
-        let status = await openVpnService.getConnectionStatus()
-        print("📡 [VPNViewModel] Status updated: \(status.rawValue)")
-        connectionStatus = status
+        connectionStatus = await openVpnService.getConnectionStatus()
     }
     
     /// Update statistics
@@ -257,27 +203,16 @@ final class VPNConnectionViewModel {
     
     /// Refresh Extension logs (only new ones)
     func refreshLogs() async {
-        print("🔄 [VPNViewModel] Refreshing Extension logs (since timestamp: \(lastLogTimestamp))...")
         let (newLogs, maxTimestamp, lastSettings) = await openVpnService.getExtensionLogs(since: lastLogTimestamp)
-        
         if let settings = lastSettings, !settings.isEmpty {
             lastAppliedTunnelSettings = "Gateway: \(settings["tunnelRemote"] ?? "?"), IP: \(settings["IPv4"] ?? "?"), DNS: \(settings["dns"] ?? "?")"
         }
         if let logs = newLogs, !logs.isEmpty {
-            // Append only new logs
             extensionLogs.append(contentsOf: logs)
-            
-            // Update last timestamp
             lastLogTimestamp = maxTimestamp
-            
-            // Keep only last 100 entries
             if extensionLogs.count > 100 {
                 extensionLogs.removeFirst(extensionLogs.count - 100)
             }
-            
-            print("📋 [VPNViewModel] ✅ Added \(logs.count) new log entries, total: \(extensionLogs.count)")
-        } else {
-            print("📋 [VPNViewModel] No new logs available")
         }
     }
     
@@ -295,12 +230,8 @@ final class VPNConnectionViewModel {
         if let logEntries = logs, !logEntries.isEmpty {
             extensionLogs = Array(logEntries.suffix(100))
             lastLogTimestamp = maxTimestamp
-            
-            print("📋 [VPNViewModel] ✅ Loaded all logs: \(logEntries.count) entries, extensionLogs.count = \(extensionLogs.count)")
-            // Note: Logs are already printed to console by VPNManager
         } else {
             extensionLogs = []
-            print("⚠️ [VPNViewModel] No logs available")
         }
     }
     

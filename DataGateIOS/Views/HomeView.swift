@@ -44,146 +44,68 @@ struct HomeView: View {
     
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                // State Block
-                VStack(spacing: 12) {
-                    // Status indicator
-                    Circle()
-                        .fill(connectionState.mainColor(for: colorScheme))
-                        .frame(width: 14, height: 14)
-                    
-                    Text(connectionState.title)
-                        .font(AppTypography.statusTitle)
-                        .foregroundColor(.primary)
-                    
-                    if let error = vpnViewModel.connectionError {
-                        Text(error)
-                            .font(AppTypography.statusSubtitle)
-                            .foregroundColor(.red)
-                            .lineLimit(2)
-                    } else {
-                        Text("Ready to connect")
-                            .font(AppTypography.statusSubtitle)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 20)
-                .background {
-                    RoundedRectangle(cornerRadius: 24)
-                        .fill(Color(.systemGray6))
-                        .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
-                }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 50)
-                
-                Spacer()
-                
-                // Last applied tunnel settings (after connect, when extension reports them)
-                if let tunnelInfo = vpnViewModel.lastAppliedTunnelSettings {
-                    Text(tunnelInfo)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundColor(.secondary)
-                        .lineLimit(2)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 6)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color(.systemGray6))
-                        .cornerRadius(6)
-                        .padding(.horizontal, 20)
-                        .padding(.bottom, 8)
-                }
-                
-                // Extension Logs Section - Always show if there are logs or errors
-                if !vpnViewModel.extensionLogs.isEmpty || vpnViewModel.connectionError != nil {
-                    VStack(spacing: 8) {
-                        // Toggle button for logs
-                        Button {
-                            vpnViewModel.toggleLogs()
-                        } label: {
-                            HStack {
-                                Image(systemName: vpnViewModel.showLogs ? "chevron.down" : "chevron.up")
-                                    .font(.system(size: 12, weight: .medium))
-                                Text("Extension Logs (\(vpnViewModel.extensionLogs.count))")
-                                    .font(.system(size: 14, weight: .medium))
-                                Spacer()
-                                if vpnViewModel.showLogs {
-                                    Button {
-                                        Task {
-                                            await vpnViewModel.refreshLogs()
-                                        }
-                                    } label: {
-                                        Image(systemName: "arrow.clockwise")
-                                            .font(.system(size: 12, weight: .medium))
-                                    }
-                                }
-                            }
-                            .foregroundColor(.secondary)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 8)
-                        }
-                        .buttonStyle(.plain)
+            ScrollView {
+                VStack(spacing: 0) {
+                    // State Block
+                    VStack(spacing: 12) {
+                        Circle()
+                            .fill(connectionState.mainColor(for: colorScheme))
+                            .frame(width: 14, height: 14)
                         
-                        // Logs content
-                        if vpnViewModel.showLogs {
-                            ScrollView {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    if vpnViewModel.extensionLogs.isEmpty {
-                                        Text("No logs available")
-                                            .font(.system(size: 12))
-                                            .foregroundColor(.secondary)
-                                            .padding()
-                                    } else {
-                                        ForEach(Array(vpnViewModel.extensionLogs.enumerated()), id: \.offset) { index, log in
-                                            Text(log)
-                                                .font(.system(size: 11, design: .monospaced))
-                                                .foregroundColor(.secondary)
-                                                .frame(maxWidth: .infinity, alignment: .leading)
-                                                .padding(.horizontal, 12)
-                                                .padding(.vertical, 4)
-                                                .background(
-                                                    index % 2 == 0 ? Color.clear : Color(.systemGray6).opacity(0.5)
-                                                )
-                                        }
-                                    }
-                                }
-                            }
-                            .frame(maxHeight: 200)
-                            .background(Color(.systemGray6))
-                            .cornerRadius(8)
-                            .padding(.horizontal, 20)
-                        }
-                    }
-                    .padding(.bottom, 20)
-                }
-                
-                // Connect Button
-                Button {
-                    print("🔘 [HomeView] Connect button tapped")
-                    Task {
-                        if vpnViewModel.isConnected {
-                            print("🔌 [HomeView] Disconnecting...")
-                            await vpnViewModel.disconnect()
+                        Text(connectionState.title)
+                            .font(AppTypography.statusTitle)
+                            .foregroundColor(.primary)
+                        
+                        if let error = vpnViewModel.connectionError {
+                            Text(error)
+                                .font(AppTypography.statusSubtitle)
+                                .foregroundColor(.red)
+                                .lineLimit(2)
                         } else {
-                            print("🔌 [HomeView] Connecting...")
-                            // Use test config for now
-                            await vpnViewModel.connectWithTestConfig()
-                            
-                            // Check status after a delay
-                            try? await Task.sleep(nanoseconds: 3_000_000_000) // 3 seconds
-                            await vpnViewModel.updateConnectionStatus()
-                            
-                            // Refresh logs after connection attempt - wait a bit for Extension to log
-                            try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
-                            await vpnViewModel.refreshLogs()
-                            
-                            // Auto-show logs if there are any
-                            if !vpnViewModel.extensionLogs.isEmpty {
-                                vpnViewModel.showLogs = true
-                            }
+                            Text("Ready to connect")
+                                .font(AppTypography.statusSubtitle)
+                                .foregroundColor(.secondary)
                         }
                     }
-                } label: {
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 20)
+                    .background {
+                        RoundedRectangle(cornerRadius: 24)
+                            .fill(Color(.systemGray6))
+                            .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 50)
+                    
+                    // Last applied tunnel settings (after connect)
+                    if let tunnelInfo = vpnViewModel.lastAppliedTunnelSettings {
+                        Text(tunnelInfo)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 6)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color(.systemGray6))
+                            .cornerRadius(6)
+                            .padding(.horizontal, 20)
+                            .padding(.bottom, 8)
+                    }
+                    
+                    // Connect Button
+                    Button {
+                        Task {
+                            if vpnViewModel.isConnected {
+                                await vpnViewModel.disconnect()
+                            } else {
+                                await vpnViewModel.connectWithTestConfig()
+                                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                                await vpnViewModel.updateConnectionStatus()
+                                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                                await vpnViewModel.refreshLogs()
+                            }
+                        }
+                    } label: {
                     let mainColor = connectionState.mainColor(for: colorScheme)
                     let bgColor = connectionState.backgroundColor(for: colorScheme)
                     
@@ -234,10 +156,69 @@ struct HomeView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .padding(.bottom, 80)
-                
-                Spacer()
+                .padding(.bottom, 32)
+                    
+                    // Extension Logs — below button, open only when user taps
+                    VStack(spacing: 8) {
+                        Button {
+                            vpnViewModel.toggleLogs()
+                        } label: {
+                            HStack {
+                                Image(systemName: vpnViewModel.showLogs ? "chevron.down" : "chevron.right")
+                                    .font(.system(size: 12, weight: .medium))
+                                Text("Logs (\(vpnViewModel.extensionLogs.count))")
+                                    .font(.system(size: 14, weight: .medium))
+                                Spacer()
+                                if vpnViewModel.showLogs {
+                                    Button {
+                                        Task { await vpnViewModel.refreshLogs() }
+                                    } label: {
+                                        Image(systemName: "arrow.clockwise")
+                                            .font(.system(size: 12, weight: .medium))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
+                            .background(Color(.systemGray6))
+                            .cornerRadius(8)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 20)
+                        
+                        if vpnViewModel.showLogs {
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    if vpnViewModel.extensionLogs.isEmpty {
+                                        Text("No logs")
+                                            .font(.system(size: 12))
+                                            .foregroundColor(.secondary)
+                                            .padding()
+                                    } else {
+                                        ForEach(Array(vpnViewModel.extensionLogs.enumerated()), id: \.offset) { index, log in
+                                            Text(log)
+                                                .font(.system(size: 11, design: .monospaced))
+                                                .foregroundColor(.secondary)
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                                .padding(.horizontal, 12)
+                                                .padding(.vertical, 4)
+                                                .background(index % 2 == 0 ? Color.clear : Color(.systemGray5))
+                                        }
+                                    }
+                                }
+                            }
+                            .frame(maxHeight: 280)
+                            .background(Color(.systemGray6))
+                            .cornerRadius(8)
+                            .padding(.horizontal, 20)
+                        }
+                    }
+                    .padding(.bottom, 40)
+                }
             }
+            .scrollBounceBehavior(.basedOnSize)
             .navigationTitle("DataGate OpenVPN")
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
