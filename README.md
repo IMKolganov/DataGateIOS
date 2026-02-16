@@ -59,16 +59,7 @@ You need **CMake** installed (e.g. `brew install cmake`).
 
 `DataGateVPNExtension/libs/` is in `.gitignore`; each developer runs the script locally.
 
-### 4. OpenVPN test config (optional)
-
-For the “test config” VPN flow (dev/debug), add your own `.ovpn` file:
-
-1. Create `DataGateIOS/test-config.ovpn` with your OpenVPN config (with certs/keys).
-2. In Xcode, add `test-config.ovpn` to the **DataGateIOS** target (File → Add Files to "DataGateIOS"… → select the file, check DataGateIOS target).
-
-`test-config.ovpn` and `*.ovpn` are in `.gitignore` and are not committed.
-
-### 5. Build in Xcode
+### 4. Build in Xcode
 
 Open `DataGateIOS.xcodeproj`, choose the DataGateIOS scheme and a device/simulator, then build (⌘B).
 

@@ -108,7 +108,7 @@ struct ServerRowView: View {
             HStack {
                 // Status indicator
                 Circle()
-                    .fill(server.openVpnServerResponses.openVpnServer.isOnline ? Color.green : Color.red)
+                    .fill((server.openVpnServerResponses.openVpnServer.isOnline ?? false) ? Color.green : Color.red)
                     .frame(width: 12, height: 12)
                 
                 Text(server.openVpnServerResponses.openVpnServer.serverName)
@@ -147,8 +147,7 @@ struct ServerRowView: View {
             // Connect button
             Button {
                 Task {
-                    // Use test config for now (temporary)
-                    await vpnViewModel.connectWithTestConfig()
+                    await vpnViewModel.connectWithServerConfig(appState: appState)
                 }
             } label: {
                 HStack {

@@ -67,6 +67,220 @@ final class OpenVpnService {
         )
     }
     
+    /// Picks best server locally from get-all-with-status: min countConnectedClients among online WSS servers (matches Android).
+    func getBest(
+        authToken: String,
+        appState: AppState? = nil,
+        completion: @escaping (Result<BestServerResult, Error>) -> Void
+    ) {
+        getAllServersWithStatus(authToken: authToken, appState: appState) { result in
+            switch result {
+            case .success(let response):
+                let candidates = response.openVpnServerWithStatuses.compactMap { BestServerResult.from($0) }
+                print("[VPN] getBest: \(candidates.count) WSS server(s), choosing by min countConnectedClients")
+                if let best = candidates.min(by: { $0.countConnectedClients < $1.countConnectedClients }) {
+                    print("[VPN] Best server selected: id=\(best.serverId), name=\(best.name ?? "?"), apiUrl=\(best.apiUrl ?? "?"), countConnectedClients=\(best.countConnectedClients)")
+                    completion(.success(best))
+                } else {
+                    completion(.failure(NSError(domain: "OpenVpnService", code: -1, userInfo: [NSLocalizedDescriptionKey: "No servers with WSS available. The app connects only to servers that have WSS (nginx) enabled. Enable WSS on at least one server in the backend."])))
+                }
+            case .failure(let error):
+                completion(.failure(error))
+            }
+        }
+    }
+    
+    // MARK: - OVPN file by CN (matches Android: download-file-by-cn, add-with-token)
+    
+    private static let pathDownloadFileByCn = "/api/open-vpn-files/download-file-by-cn"
+    private static let pathAddWithToken = "/api/open-vpn-files/add-with-token"
+    
+    /// Ensures device config exists: try download by CN; if missing, create via add-with-token then download again. Matches Android ensureAndDownloadDeviceFile.
+    func ensureAndDownloadDeviceFile(
+        vpnServerId: Int,
+        commonName: String,
+        externalId: String,
+        issuedTo: String,
+        authToken: String,
+        appState: AppState? = nil,
+        completion: @escaping (Result<OvpnDownloadResult, Error>) -> Void
+    ) {
+        func run(with token: String) {
+            tryDownloadFileByCn(vpnServerId: vpnServerId, commonName: commonName, token: token) { [weak self] result in
+                switch result {
+                case .success(let optionalFile):
+                    if let file = optionalFile {
+                        print("[VPN] ensureAndDownloadDeviceFile: config found on first download")
+                        completion(.success(file))
+                        return
+                    }
+                    print("[VPN] ensureAndDownloadDeviceFile: config not found (404), creating via add-with-token...")
+                    self?.createFileOnServer(vpnServerId: vpnServerId, commonName: commonName, externalId: externalId, issuedTo: issuedTo, token: token, appState: appState) { createResult in
+                        switch createResult {
+                        case .success:
+                            print("[VPN] ensureAndDownloadDeviceFile: create OK, downloading again...")
+                            self?.tryDownloadFileByCn(vpnServerId: vpnServerId, commonName: commonName, token: token) { secondResult in
+                                switch secondResult {
+                                case .success(let file?):
+                                    print("[VPN] ensureAndDownloadDeviceFile: second download OK")
+                                    completion(.success(file))
+                                case .success(nil):
+                                    print("[VPN] ensureAndDownloadDeviceFile: second download still 404")
+                                    completion(.failure(NSError(domain: "OpenVpnService", code: -1, userInfo: [NSLocalizedDescriptionKey: "File still not found after create"])))
+                                case .failure(let err):
+                                    completion(.failure(err))
+                                }
+                            }
+                        case .failure(let err):
+                            print("[VPN] ensureAndDownloadDeviceFile: create failed: \(err)")
+                            completion(.failure(err))
+                        }
+                    }
+                case .failure(let err):
+                    completion(.failure(err))
+                }
+            }
+        }
+        if let appState = appState {
+            appState.ensureValidToken { isValid in
+                guard isValid, let token = appState.bearerToken else {
+                    completion(.failure(NSError(domain: "OpenVpnService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid or expired token"])))
+                    return
+                }
+                run(with: token)
+            }
+        } else {
+            run(with: authToken)
+        }
+    }
+    
+    /// POST download-file-by-cn. Success(nil) = file not found (404 or 400 "not found").
+    private func tryDownloadFileByCn(
+        vpnServerId: Int,
+        commonName: String,
+        token: String,
+        completion: @escaping (Result<OvpnDownloadResult?, Error>) -> Void
+    ) {
+        struct Body: Encodable {
+            let vpnServerId: Int
+            let commonName: String
+        }
+        guard let url = URL(string: Self.pathDownloadFileByCn, relativeTo: APIConfig.baseURL) else {
+            completion(.failure(NSError(domain: "OpenVpnService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid URL"])))
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        do {
+            request.httpBody = try JSONEncoder().encode(Body(vpnServerId: vpnServerId, commonName: commonName))
+        } catch {
+            completion(.failure(error))
+            return
+        }
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error = error {
+                completion(.failure(error))
+                return
+            }
+            guard let http = response as? HTTPURLResponse else {
+                completion(.failure(NSError(domain: "OpenVpnService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid response"])))
+                return
+            }
+            if http.statusCode == 404 {
+                print("[VPN] tryDownloadFileByCn: HTTP 404 (file not found for this CN)")
+                completion(.success(nil))
+                return
+            }
+            if http.statusCode == 400, let data = data,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let msg = (json["message"] as? String)?.lowercased(), msg.contains("not found") {
+                completion(.success(nil))
+                return
+            }
+            guard (200...299).contains(http.statusCode), let data = data else {
+                print("[VPN] tryDownloadFileByCn: HTTP \(http.statusCode)")
+                completion(.failure(NSError(domain: "OpenVpnService", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "Download failed: HTTP \(http.statusCode)"])))
+                return
+            }
+            print("[VPN] tryDownloadFileByCn: HTTP 200, decoding config")
+            do {
+                let apiResp = try JSONDecoder().decode(ApiResponse<DownloadFileByCnData>.self, from: data)
+                guard let payload = apiResp.data else {
+                    completion(.success(nil))
+                    return
+                }
+                guard let decoded = Data(base64Encoded: payload.content) else {
+                    completion(.failure(NSError(domain: "OpenVpnService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid base64 content"])))
+                    return
+                }
+                let fileName = payload.issuedOvpn?.fileName ?? "client.ovpn"
+                let ct = http.value(forHTTPHeaderField: "Content-Type")
+                completion(.success(OvpnDownloadResult(fileName: fileName, content: decoded, contentType: ct)))
+            } catch {
+                completion(.failure(error))
+            }
+        }.resume()
+    }
+    
+    private func createFileOnServer(
+        vpnServerId: Int,
+        commonName: String,
+        externalId: String,
+        issuedTo: String,
+        token: String,
+        appState: AppState?,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        struct Body: Encodable {
+            let vpnServerId: Int
+            let commonName: String
+            let externalId: String
+            let issuedTo: String
+        }
+        guard let url = URL(string: Self.pathAddWithToken, relativeTo: APIConfig.baseURL) else {
+            completion(.failure(NSError(domain: "OpenVpnService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid URL"])))
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        do {
+            request.httpBody = try JSONEncoder().encode(Body(vpnServerId: vpnServerId, commonName: commonName, externalId: externalId, issuedTo: issuedTo))
+        } catch {
+            completion(.failure(error))
+            return
+        }
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            if let error = error {
+                completion(.failure(error))
+                return
+            }
+            guard let http = response as? HTTPURLResponse else {
+                completion(.failure(NSError(domain: "OpenVpnService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid response"])))
+                return
+            }
+            if http.statusCode == 401, let appState = appState {
+                appState.refreshAccessToken { success in
+                    guard success, let newToken = appState.bearerToken else {
+                        completion(.failure(NSError(domain: "OpenVpnService", code: 401, userInfo: [NSLocalizedDescriptionKey: "Unauthorized"])))
+                        return
+                    }
+                    self?.createFileOnServer(vpnServerId: vpnServerId, commonName: commonName, externalId: externalId, issuedTo: issuedTo, token: newToken, appState: appState, completion: completion)
+                }
+                return
+            }
+            guard (200...299).contains(http.statusCode) else {
+                completion(.failure(NSError(domain: "OpenVpnService", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "Create failed: HTTP \(http.statusCode)"])))
+                return
+            }
+            completion(.success(()))
+        }.resume()
+    }
+    
     // MARK: - VPN Connection Management
     
     /// Get OpenVPN configuration file (.ovpn) from server
@@ -173,26 +387,80 @@ final class OpenVpnService {
         try await vpnManager.connect()
     }
     
-    /// Connect using test config loaded from external file (test-config.ovpn in app bundle)
-    func connectWithTestConfig() async throws {
-        let loaded = try VPNTestConfig.loadTestConfig()
-        do {
-            try await vpnManager.configureVPN(
-                serverAddress: loaded.serverAddress,
-                serverPort: loaded.serverPort,
-                protocolType: loaded.protocolType,
-                ovpnConfigContent: loaded.content
-            )
-            
-            try await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
-            
-            try await vpnManager.connect()
-        } catch {
-            if let nsError = error as NSError? {
-                _ = (nsError.domain, nsError.code, nsError.userInfo)
-            }
-            throw error
+    /// Port for WSS bridge: TCP server in extension listens here; OpenVPN config uses remote 127.0.0.1 thisPort. Must match Android BRIDGE_PORT (41194).
+    private static let wssBridgePort = 41194
+
+    /// Connect using config obtained from server (getBest + ensureAndDownloadDeviceFile).
+    /// Patches config for WSS (remote 127.0.0.1:bridgePort, proto tcp-client) and passes wssUrl to extension.
+    func connectWithDownloadedConfig(best: BestServerResult, ovpnContent: Data) async throws {
+        guard let apiUrl = best.apiUrl, !apiUrl.isEmpty else {
+            print("[VPN] connectWithDownloadedConfig failed: best server has no apiUrl")
+            throw NSError(domain: "OpenVpnService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Best server has no apiUrl"])
         }
+        let wssUrl = httpsToWssProxy(apiUrl)
+        print("[VPN] WSS proxy URL: \(wssUrl) (from apiUrl: \(apiUrl))")
+        let configText = String(data: ovpnContent, encoding: .utf8) ?? ""
+        let patchedConfig = forceWssConfig(original: configText)
+        let bridgePort = Self.wssBridgePort
+        print("[VPN] Config patched for WSS: remote 127.0.0.1:\(bridgePort), proto tcp-client. Config size: \(patchedConfig.count) chars")
+        print("[VPN] Configuring VPN (extension) with wssUrl...")
+        try await vpnManager.configureVPN(
+            serverAddress: "127.0.0.1",
+            serverPort: bridgePort,
+            protocolType: "tcp-client",
+            ovpnConfigContent: patchedConfig,
+            wssUrl: wssUrl
+        )
+        print("[VPN] Starting VPN tunnel...")
+        try await vpnManager.connect()
+        print("[VPN] Tunnel start requested; check extension status for connection result")
+    }
+    
+    /// Patch .ovpn for WSS: remote → 127.0.0.1:bridgePort, proto → tcp-client (matches Android forceWssConfig).
+    private func forceWssConfig(original: String) -> String {
+        let bridgePort = Self.wssBridgePort
+        let lines = original
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .components(separatedBy: "\n")
+        var out: [String] = []
+        var remoteWritten = false
+        var protoWritten = false
+        for raw in lines {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            let lower = line.lowercased()
+            if lower.hasPrefix("remote ") {
+                if !remoteWritten {
+                    out.append("remote 127.0.0.1 \(bridgePort)")
+                    remoteWritten = true
+                }
+            } else if lower.hasPrefix("proto ") {
+                out.append("proto tcp-client")
+                protoWritten = true
+            } else {
+                out.append(raw)
+            }
+        }
+        if !protoWritten { out.insert("proto tcp-client", at: 0) }
+        if !remoteWritten { out.insert("remote 127.0.0.1 \(bridgePort)", at: 0) }
+        return out.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines) + "\n"
+    }
+    
+    /// Build WSS URL for proxy: https://host → wss://host/api/proxy (matches Android httpsToWssProxy).
+    private func httpsToWssProxy(_ apiUrl: String) -> String {
+        guard let url = URL(string: apiUrl),
+              let scheme = url.scheme?.lowercased(),
+              let host = url.host else {
+            return apiUrl
+        }
+        let wssScheme = (scheme == "https") ? "wss" : "ws"
+        var comps = URLComponents()
+        comps.scheme = wssScheme
+        comps.host = host
+        comps.port = url.port
+        comps.path = "/api/proxy"
+        comps.query = nil
+        comps.fragment = nil
+        return comps.string ?? "\(wssScheme)://\(host)/api/proxy"
     }
     
     /// Disconnect from VPN

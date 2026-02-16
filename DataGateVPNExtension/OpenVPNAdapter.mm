@@ -189,6 +189,35 @@ static void openvpn_adapter_loaded() {
 
 using namespace openvpn;
 
+/// Rewrite OpenVPN config so "remote" points to localhost (for WSS bridge: extension TCP server).
+/// Replaces lines like "remote 185.70.197.119 1194" with "remote 127.0.0.1 localPort".
+static std::string rewriteRemoteToLocalhost(const std::string& config, uint16_t localPort) {
+    std::string out;
+    out.reserve(config.size());
+    size_t i = 0;
+    const std::string remoteKey = "remote ";
+    while (i < config.size()) {
+        size_t lineStart = i;
+        size_t nextLine = config.find('\n', i);
+        if (nextLine == std::string::npos) nextLine = config.size();
+        std::string line = config.substr(i, nextLine - i);
+        // Check if line starts with "remote " (after optional leading whitespace)
+        size_t pos = 0;
+        while (pos < line.size() && (line[pos] == ' ' || line[pos] == '\t')) pos++;
+        if (pos + remoteKey.size() <= line.size() && line.compare(pos, remoteKey.size(), remoteKey) == 0) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "remote 127.0.0.1 %u", (unsigned int)localPort);
+            out.append(buf);
+            out.push_back('\n');
+        } else {
+            out.append(line);
+            if (nextLine < config.size()) out.push_back('\n');
+        }
+        i = nextLine + (nextLine < config.size() ? 1 : 0);
+    }
+    return out;
+}
+
 /// Remove trailing bytes after each PEM block end marker so mbedTLS (in openvpn3) can parse.
 /// OpenVPN3 submodule is used as-is; we do not patch it, so cleaning is done here.
 static std::string cleanOvpnConfigPemTrailing(const std::string& config) {

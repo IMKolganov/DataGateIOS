@@ -20,6 +20,10 @@
 #import <signal.h>
 #import <execinfo.h>
 #import <Foundation/Foundation.h>
+#import <sys/socket.h>
+#import <netinet/in.h>
+#import <arpa/inet.h>
+#import <unistd.h>
 
 // PSA Crypto initialization for mbedTLS 3.6+ (required for TLS 1.3)
 // CRITICAL: Include build_info.h to get MBEDTLS_VERSION_NUMBER
@@ -203,6 +207,10 @@ static void extension_loaded() {
 @property (nonatomic, strong) NSError *lastError; // Store last error for app messages
 @property (nonatomic, strong) NSTimer *watchdogTimer; // Timer to ensure Extension stays alive
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *logEntries; // Store log entries for debugging
+@property (nonatomic, assign) int wssBridgeListenSocket; // TCP server for WSS bridge (-1 when not used)
+@property (nonatomic, strong) NSURLSession *wssSession; // Kept alive for bridge
+@property (nonatomic, strong) NSURLSessionWebSocketTask *wssTask; // Kept alive for bridge
+@property (nonatomic, strong) dispatch_queue_t wssBridgeQueue; // Queue for accept loop and bridge
 @end
 
 @implementation PacketTunnelProvider
@@ -219,6 +227,7 @@ static void extension_loaded() {
         self = [super init];
         if (self) {
             self.logEntries = [NSMutableArray array];
+            self.wssBridgeListenSocket = -1;
             
             // CRITICAL: Initialize PSA Crypto for mbedTLS 3.6+ (required for TLS 1.3)
             // Must be done BEFORE any mbedTLS operations
@@ -337,6 +346,112 @@ static void extension_loaded() {
     }
 }
 
+#pragma mark - WSS Bridge (TCP 127.0.0.1:port <-> WebSocket)
+
+- (void)startWssBridgeWithPort:(int)port wssUrl:(NSString *)wssUrl {
+    self.wssBridgeListenSocket = -1;
+    self.wssBridgeQueue = dispatch_queue_create("com.datagate.wssbridge", DISPATCH_QUEUE_SERIAL);
+    __unsafe_unretained PacketTunnelProvider *weakSelf = self;
+    
+    dispatch_async(self.wssBridgeQueue, ^{
+        int listenFd = socket(AF_INET, SOCK_STREAM, 0);
+        if (listenFd < 0) {
+            NSLog(@"[PacketTunnel] WSS bridge: socket() failed: %d", errno);
+            [weakSelf addLogEntry:[NSString stringWithFormat:@"WSS bridge socket() failed: %d", errno] level:@"ERROR"];
+            return;
+        }
+        int reuse = 1;
+        setsockopt(listenFd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+        
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons((uint16_t)port);
+        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+        
+        if (bind(listenFd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+            NSLog(@"[PacketTunnel] WSS bridge: bind() failed: %d", errno);
+            [weakSelf addLogEntry:[NSString stringWithFormat:@"WSS bridge bind() failed: %d", errno] level:@"ERROR"];
+            close(listenFd);
+            return;
+        }
+        if (listen(listenFd, 1) < 0) {
+            NSLog(@"[PacketTunnel] WSS bridge: listen() failed: %d", errno);
+            close(listenFd);
+            return;
+        }
+        weakSelf.wssBridgeListenSocket = listenFd;
+        NSLog(@"[PacketTunnel] WSS bridge: TCP server listening on 127.0.0.1:%d", port);
+        [weakSelf addLogEntry:[NSString stringWithFormat:@"WSS bridge listening 127.0.0.1:%d", port] level:@"INFO"];
+        
+        int clientFd = accept(listenFd, NULL, NULL);
+        if (clientFd < 0) {
+            NSLog(@"[PacketTunnel] WSS bridge: accept() failed: %d", errno);
+            return;
+        }
+        NSLog(@"[PacketTunnel] WSS bridge: OpenVPN connected, bridging to WSS");
+        [weakSelf addLogEntry:@"WSS bridge: OpenVPN connected, starting TCP<->WSS bridge" level:@"INFO"];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf bridgeTcpFd:clientFd toWssUrl:wssUrl];
+        });
+    });
+}
+
+- (void)bridgeTcpFd:(int)clientFd toWssUrl:(NSString *)wssUrl {
+    NSURL *url = [NSURL URLWithString:wssUrl];
+    if (!url || !url.scheme) {
+        NSLog(@"[PacketTunnel] WSS bridge: invalid URL %@", wssUrl);
+        close(clientFd);
+        return;
+    }
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+    self.wssSession = [NSURLSession sessionWithConfiguration:cfg];
+    self.wssTask = [self.wssSession webSocketTaskWithURL:url];
+    [self.wssTask resume];
+    
+    __unsafe_unretained PacketTunnelProvider *weakSelf = self;
+    const size_t bufSize = 16 * 1024;
+    char *buf = (char *)malloc(bufSize);
+    if (!buf) { close(clientFd); return; }
+    
+    // TCP -> WSS: read from socket, send as WebSocket binary
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        while (1) {
+            ssize_t n = read(clientFd, buf, bufSize);
+            if (n <= 0) break;
+            NSData *data = [NSData dataWithBytes:buf length:(NSUInteger)n];
+            NSURLSessionWebSocketMessage *msg = [[NSURLSessionWebSocketMessage alloc] initWithData:data];
+            dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+            __block NSError *sendErr = nil;
+            [weakSelf.wssTask sendMessage:msg completionHandler:^(NSError *error) {
+                sendErr = error;
+                dispatch_semaphore_signal(sem);
+            }];
+            dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+            if (sendErr) break;
+        }
+        close(clientFd);
+        free(buf);
+    });
+    
+    // WSS -> TCP: receive WebSocket messages, write to socket (recursive block to keep receiving)
+    __block void (^receiveNext)(void);
+    receiveNext = ^{
+        [weakSelf.wssTask receiveMessageWithCompletionHandler:^(NSURLSessionWebSocketMessage *message, NSError *error) {
+            if (error || !message) {
+                close(clientFd);
+                return;
+            }
+            NSData *data = message.data;
+            if (data.length > 0) {
+                write(clientFd, data.bytes, data.length);
+            }
+            receiveNext();
+        }];
+    };
+    receiveNext();
+}
+
 - (void)startTunnelWithOptions:(NSDictionary<NSString *,NSObject *> *)options 
               completionHandler:(void (^)(NSError *))completionHandler {
     
@@ -387,6 +502,16 @@ static void extension_loaded() {
         NSString *configContent = config[@"config"];
         NSString *server = config[@"server"];
         NSNumber *port = config[@"port"];
+        NSString *wssUrl = config[@"wssUrl"];  // Optional: WSS tunnel URL from backend (OpenVPN over WebSocket)
+        NSNumber *useWSS = config[@"useWSS"];  // Optional: if YES, extension should use localhost + WSS bridge
+        
+        if (wssUrl.length > 0 && useWSS.boolValue) {
+            // Port must match app (OpenVpnService.wssBridgePort) and Android BRIDGE_PORT = 41194
+            int bridgePort = (port != nil && port.intValue > 0) ? port.intValue : 41194;
+            [self addLogEntry:[NSString stringWithFormat:@"WSS mode: starting TCP server 127.0.0.1:%d → %@", bridgePort, wssUrl] level:@"INFO"];
+            NSLog(@"[PacketTunnel] WSS bridge: TCP server 127.0.0.1:%d, wssUrl=%@", bridgePort, wssUrl);
+            [self startWssBridgeWithPort:bridgePort wssUrl:wssUrl];
+        }
         
         if (!configContent || configContent.length == 0) {
             NSLog(@"❌ [PacketTunnel] ERROR: Config content is empty or nil!");

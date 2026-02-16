@@ -48,11 +48,13 @@ final class VPNManager {
     
     /// Create and configure VPN manager with OpenVPN server configuration
     /// Uses certificate-based authentication (certificates are in .ovpn config file)
+    /// - Parameter wssUrl: Optional. When set, extension will use WSS to connect (localhost + WebSocket bridge). Provide when backend is ready.
     func configureVPN(
         serverAddress: String,
         serverPort: Int,
         protocolType: String = "udp",
-        ovpnConfigContent: String
+        ovpnConfigContent: String,
+        wssUrl: String? = nil
     ) async throws {
         // Remove only OUR VPN configurations (DataGate VPN) to avoid duplicates
         // This does NOT remove other VPN apps' configurations
@@ -83,12 +85,18 @@ final class VPNManager {
         // No username/password needed - certificates are in .ovpn file
         
         // Store OpenVPN config in provider configuration
-        var providerConfig = [String: Any]()
-        providerConfig["config"] = ovpnConfigContent  // Full .ovpn file content with certificates
-        providerConfig["server"] = serverAddress
-        providerConfig["port"] = serverPort
-        providerConfig["protocol"] = protocolType
-        
+        var providerConfig: [String: Any] = [
+            "config": ovpnConfigContent,
+            "server": serverAddress,
+            "port": serverPort,
+            "protocol": protocolType
+        ]
+        // Optional: for WSS mode, pass wssUrl so the extension connects via WebSocket to backend
+        if let wssUrl = wssUrl, !wssUrl.isEmpty {
+            providerConfig["wssUrl"] = wssUrl
+            providerConfig["useWSS"] = true
+            print("[VPN] Extension providerConfig: wssUrl=\(wssUrl), useWSS=true, server=127.0.0.1:\(serverPort)")
+        }
         protocolConfig.providerConfiguration = providerConfig
         
         manager.protocolConfiguration = protocolConfig

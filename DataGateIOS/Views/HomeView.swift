@@ -98,7 +98,7 @@ struct HomeView: View {
                             if vpnViewModel.isConnected {
                                 await vpnViewModel.disconnect()
                             } else {
-                                await vpnViewModel.connectWithTestConfig()
+                                await vpnViewModel.connectWithServerConfig(appState: appState)
                                 try? await Task.sleep(nanoseconds: 3_000_000_000)
                                 await vpnViewModel.updateConnectionStatus()
                                 try? await Task.sleep(nanoseconds: 1_000_000_000)

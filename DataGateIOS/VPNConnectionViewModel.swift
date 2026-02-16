@@ -107,38 +107,70 @@ final class VPNConnectionViewModel {
         }
     }
     
-    /// Connect using test config from file (test-config.ovpn in app bundle)
-    /// TODO: Remove after testing
-    func connectWithTestConfig() async {
+    /// Connect using config from server: getBest → ensureAndDownloadDeviceFile (by CN) → connect with WSS.
+    func connectWithServerConfig(appState: AppState) async {
         isConnecting = true
         connectionError = nil
-        extensionLogs = [] // Clear logs on new connection attempt
+        extensionLogs = []
         lastAppliedTunnelSettings = nil
+        lastLogTimestamp = 0
         
-        do {
-            try await openVpnService.connectWithTestConfig()
-            try await Task.sleep(nanoseconds: 2_000_000_000) // 2 seconds
-            await updateConnectionStatus()
-            let status = connectionStatus
-            
-            await loadAllLogs()
-            
-            if status != .connected {
-                if let extensionError = await getExtensionError() {
-                    connectionError = extensionError
-                } else {
-                    connectionError = "Connection failed. Status: \(statusDescription)"
+        defer { isConnecting = false }
+        
+        guard let token = appState.bearerToken else {
+            connectionError = "Not authorized"
+            return
+        }
+        let externalId = "\(appState.currentUser?.userId ?? 0)"
+        let installationHash = InstallationIdManager.shared.installationHash()
+        let issuedTo = "datagate ios user \(externalId) device \(installationHash)"
+        print("[VPN] connectWithServerConfig: externalId=\(externalId), issuedTo=\(issuedTo)")
+        
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            OpenVpnService.shared.getBest(authToken: token, appState: appState) { [weak self] result in
+                Task { @MainActor in
+                    switch result {
+                    case .success(let best):
+                        print("[VPN] getBest OK: serverId=\(best.serverId), name=\(best.name ?? "?")")
+                        let commonName = InstallationIdManager.shared.fullInstallationId(serverId: best.serverId, googleUserId: externalId)
+                        print("[VPN] ensureAndDownloadDeviceFile: vpnServerId=\(best.serverId), commonName=\(commonName)")
+                        OpenVpnService.shared.ensureAndDownloadDeviceFile(
+                            vpnServerId: best.serverId,
+                            commonName: commonName,
+                            externalId: externalId,
+                            issuedTo: issuedTo,
+                            authToken: token,
+                            appState: appState
+                        ) { [weak self] fileResult in
+                            Task { @MainActor in
+                                switch fileResult {
+                                case .success(let downloaded):
+                                    print("[VPN] ensureAndDownloadDeviceFile OK: fileName=\(downloaded.fileName), content size=\(downloaded.content.count) bytes")
+                                    do {
+                                        try await OpenVpnService.shared.connectWithDownloadedConfig(best: best, ovpnContent: downloaded.content)
+                                        await self?.updateConnectionStatus()
+                                        await self?.loadAllLogs()
+                                        print("[VPN] connectWithDownloadedConfig completed without throw")
+                                    } catch {
+                                        print("[VPN] connectWithDownloadedConfig error: \(error)")
+                                        self?.connectionError = error.localizedDescription
+                                        await self?.loadAllLogs()
+                                    }
+                                case .failure(let error):
+                                    print("[VPN] ensureAndDownloadDeviceFile failed: \(error)")
+                                    self?.connectionError = error.localizedDescription
+                                }
+                                continuation.resume()
+                            }
+                        }
+                    case .failure(let error):
+                        print("[VPN] getBest failed: \(error)")
+                        self?.connectionError = error.localizedDescription
+                        continuation.resume()
+                    }
                 }
             }
-        } catch {
-            connectionError = error.localizedDescription
-            await loadAllLogs()
-            if let extensionError = await getExtensionError() {
-                connectionError = "\(error.localizedDescription)\nExtension error: \(extensionError)"
-            }
         }
-        
-        isConnecting = false
     }
     
     /// Get error from Extension via app message

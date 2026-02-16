@@ -87,12 +87,8 @@ final class APIClient {
                 return
             }
 
-            // Log raw response for debugging
-            if let jsonString = String(data: data, encoding: .utf8) {
-                print("📡 API Response: \(jsonString.prefix(500))")
-            }
-            
-            // Read backend response flexibly (camelCase or PascalCase) so we always show server error message
+            // Don't log response body — it may contain tokens and other sensitive data
+            // Read backend response for success/message and to show server error message
             guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 completion(.failure(NSError(domain: "APIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid JSON response"])))
                 return
@@ -108,12 +104,7 @@ final class APIClient {
                 return
             }
 
-            // Configure decoder to handle PascalCase
             let decoder = JSONDecoder()
-            // Try decoding with PascalCase first (C# backend default)
-            if let dataDict = json["data"] as? [String: Any] ?? json["Data"] as? [String: Any] {
-                print("📦 Data structure keys: \(dataDict.keys.joined(separator: ", "))")
-            }
 
             // Decode in MainActor context to satisfy Swift 6 concurrency requirements
             Task { @MainActor in
