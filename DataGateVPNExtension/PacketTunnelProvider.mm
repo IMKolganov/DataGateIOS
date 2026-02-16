@@ -1058,7 +1058,7 @@ static void extension_loaded() {
         NSString *matchDomainsStr = settings.DNSSettings.matchDomains.count > 0
             ? [settings.DNSSettings.matchDomains componentsJoinedByString:@"; "] : @"(nil=all)";
         [self addLogEntry:[NSString stringWithFormat:@"🔧 Updating network settings from OpenVPN3: tunnelRemote=%@, IPv4=%@, DNS=%@, matchDomains=%@", remoteStr, ipv4Str, dnsStr, matchDomainsStr] level:@"INFO"];
-        // TUNNEL DEBUG: dump routes (должен быть default = 0.0.0.0/0)
+        // TUNNEL DEBUG: dump routes (should include default = 0.0.0.0/0)
         if (settings.IPv4Settings.includedRoutes.count > 0) {
             NSMutableArray *routeStrs = [NSMutableArray array];
             for (NEIPv4Route *r in settings.IPv4Settings.includedRoutes) {

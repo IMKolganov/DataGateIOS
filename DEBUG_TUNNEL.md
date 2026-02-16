@@ -1,52 +1,52 @@
-# Отладка iOS VPN туннеля (NEPacketTunnelProvider)
+# Debugging iOS VPN tunnel (NEPacketTunnelProvider)
 
-Проблема: VPN подключается, пакеты идут packetFlow ↔ OpenVPN3, но интернета нет (connectivity check — таймаут).
+Issue: VPN connects, packets flow packetFlow ↔ OpenVPN3, but no internet (connectivity check times out).
 
-## Что уже добавлено в код
+## What is already in the code
 
-### 1. Логи `[TUNNEL DEBUG]` в Extension
+### 1. `[TUNNEL DEBUG]` logs in Extension
 
-После подключения смотри в **Extension Logs** в приложении (или в консоли Xcode для процесса расширения):
+After connecting, check **Extension Logs** in the app (or in Xcode console for the extension process):
 
-- **FROM_DEVICE** — первые 5 пакетов **из устройства в туннель** (то, что iOS отдаёт в packetFlow).
-  - Ожидаемо: `10.50.29.2 -> 8.8.8.8 proto=17` (DNS), `10.50.29.2 -> <IP сайта> proto=6` (TCP) и т.п.
-  - Если видишь только `10.50.29.2 -> 10.50.29.1` — возможно, весь трафик уходит на шлюз (ARP/какой-то служебный), а не в интернет.
-  - Если **нет записей FROM_DEVICE** или их очень мало — iOS **не направляет** трафик приложений в туннель (проблема маршрутизации/настроек).
+- **FROM_DEVICE** — first 5 packets **from device into tunnel** (what iOS feeds into packetFlow).
+  - Expected: `10.50.29.2 -> 8.8.8.8 proto=17` (DNS), `10.50.29.2 -> <site IP> proto=6` (TCP), etc.
+  - If you only see `10.50.29.2 -> 10.50.29.1` — traffic may be going to the gateway (ARP/some service) instead of the internet.
+  - If **no FROM_DEVICE entries** or very few — iOS is **not routing** app traffic into the tunnel (routing/settings issue).
 
-- **TO_DEVICE** — первые 5 пакетов **из туннеля в устройство** (ответы, которые мы пишем в packetFlow).
-  - Ожидаемо: `8.8.8.8 -> 10.50.29.2 proto=17`, ответы TCP и т.д.
-  - Если есть FROM_DEVICE, но нет TO_DEVICE — запросы уходят в туннель, но ответы не доходят или не пишутся.
+- **TO_DEVICE** — first 5 packets **from tunnel to device** (responses we write to packetFlow).
+  - Expected: `8.8.8.8 -> 10.50.29.2 proto=17`, TCP responses, etc.
+  - If there is FROM_DEVICE but no TO_DEVICE — requests go into the tunnel but responses do not come back or are not written.
 
-- **includedRoutes** — при применении настроек логируется список маршрутов.
-  - Должен быть маршрут по умолчанию, например `0.0.0.0/255.255.255.255` или аналог (одна запись default).
-  - Если default нет — трафик в интернет не пойдёт через туннель.
+- **includedRoutes** — when settings are applied, the route list is logged.
+  - There should be a default route, e.g. `0.0.0.0/255.255.255.255` or similar (one default entry).
+  - If there is no default — internet traffic will not go through the tunnel.
 
-- **excludedRoutes** — если есть, логируются как WARNING.
-  - Если в excluded попал 0.0.0.0/0 или широкий диапазон — часть трафика может уходить мимо туннеля или теряться.
+- **excludedRoutes** — if present, logged as WARNING.
+  - If 0.0.0.0/0 or a wide range is in excluded — some traffic may bypass the tunnel or be lost.
 
-## Как дебажить по шагам
+## Step-by-step debugging
 
-1. **Подключи VPN**, дождись "Connected", открой **Extension Logs** в приложении.
-2. **Найди блок** с только что применёнными настройками:
+1. **Connect VPN**, wait for "Connected", open **Extension Logs** in the app.
+2. **Find the block** with the newly applied settings:
    - `🔧 Updating network settings from OpenVPN3: tunnelRemote=..., IPv4=..., DNS=..., matchDomains=...`
-   - Сразу под ним: `[TUNNEL DEBUG] includedRoutes(N): ...` — проверь, что есть default (0.0.0.0/...).
-3. **Найди строки** `[TUNNEL DEBUG] FROM_DEVICE`:
-   - Есть ли пакеты вообще?
-   - Куда они идут: на 10.50.29.1, на 8.8.8.8, на внешние IP? proto=6 (TCP) / 17 (UDP)?
-4. **Найди строки** `[TUNNEL DEBUG] TO_DEVICE`:
-   - Есть ли ответы? Совпадают ли пары src/dst с FROM_DEVICE (в обратную сторону)?
-5. **Сделай действие в интернете** (открой сайт в Safari, обнови приложение с сетью) и снова посмотри логи — появляются ли новые FROM_DEVICE/TO_DEVICE после этого.
+   - Right below it: `[TUNNEL DEBUG] includedRoutes(N): ...` — verify there is a default (0.0.0.0/...).
+3. **Find lines** `[TUNNEL DEBUG] FROM_DEVICE`:
+   - Are there any packets?
+   - Where do they go: 10.50.29.1, 8.8.8.8, external IPs? proto=6 (TCP) / 17 (UDP)?
+4. **Find lines** `[TUNNEL DEBUG] TO_DEVICE`:
+   - Are there responses? Do src/dst pairs match FROM_DEVICE (in reverse)?
+5. **Trigger some internet activity** (open a site in Safari, refresh an app that uses network) and check logs again — do new FROM_DEVICE/TO_DEVICE entries appear?
 
-## Интерпретация
+## Interpretation
 
-| Ситуация | Вывод |
-|----------|--------|
-| Нет FROM_DEVICE или только на 10.50.29.1 | iOS не направляет трафик приложений в туннель. Проверь includedRoutes (должен быть default), matchDomains, что setTunnelNetworkSettings вызывается один раз и startCompletionHandler вызывается после него. |
-| Есть FROM_DEVICE на 8.8.8.8 и внешние IP, нет TO_DEVICE | Запросы уходят в туннель и в OpenVPN3, ответы не возвращаются или не пишутся в packetFlow. Смотреть сторону сервера (NAT/firewall) и код записи в packetFlow. |
-| Есть FROM_DEVICE и TO_DEVICE, пары симметричные | Пакеты в обе стороны идут. Тогда проблема может быть в том, что приложение (Safari/другое) не использует этот туннель (например, другой интерфейс), или в таймингах/порядке вызовов. |
-| includedRoutes без default | Добавить default route в OpenVPNAdapter при сборке настроек. |
+| Situation | Conclusion |
+|-----------|------------|
+| No FROM_DEVICE or only to 10.50.29.1 | iOS is not routing app traffic into the tunnel. Check includedRoutes (must have default), matchDomains, that setTunnelNetworkSettings is called once and startCompletionHandler is called after it. |
+| FROM_DEVICE to 8.8.8.8 and external IPs, no TO_DEVICE | Requests go into the tunnel and OpenVPN3, but responses do not return or are not written to packetFlow. Check server side (NAT/firewall) and packetFlow write code. |
+| FROM_DEVICE and TO_DEVICE present, pairs symmetric | Packets flow both ways. Then the issue may be that the app (Safari/other) is not using this tunnel (e.g. different interface), or timing/call order. |
+| includedRoutes without default | Add default route in OpenVPNAdapter when building settings. |
 
-## Дополнительно
+## Additional notes
 
-- **Консоль Xcode**: запуск приложения из Xcode и выбор процесса **DataGateVPNExtension** в консоли даёт все NSLog/printf из расширения в реальном времени.
-- **Apple TN3120 / TN3134**: технические заметки по Network Extension и packet tunnel — порядок вызовов, когда вызывать startCompletionHandler, как задавать маршруты и DNS.
+- **Xcode console**: running the app from Xcode and selecting the **DataGateVPNExtension** process in the console shows all NSLog/printf from the extension in real time.
+- **Apple TN3120 / TN3134**: technical notes on Network Extension and packet tunnel — call order, when to call startCompletionHandler, how to set routes and DNS.

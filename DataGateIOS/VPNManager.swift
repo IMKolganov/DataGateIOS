@@ -376,6 +376,14 @@ final class VPNManager {
     
     /// Filter out certificate dumps and verbose debug from extension logs
     private static func shouldShowLogMessage(_ message: String) -> Bool {
+        // Never show log lines that could contain certificate or key data (security)
+        if message.contains("-----BEGIN ") || message.contains("-----END ") {
+            return false
+        }
+        if message.contains("CERTIFICATE-----") || message.contains("PRIVATE KEY-----") {
+            return false
+        }
+        // Skip noisy/debug substrings
         let skipSubstrings = [
             " (hex)", " (text)", " bytes DER", "Got DER buffer", "METHOD CALLED",
             "CLEANING CA", "CLEANING CERTIFICATE", "[load_ca]", "PEM marker search",
@@ -386,7 +394,8 @@ final class VPNManager {
             "First 50 bytes", "Last 50 bytes", "First 100 bytes", "Base64 content",
             "DER starts with", "Security Framework validation result",
             "validateCertificateWithSecurityFramework returned", "Calling mbedtls_pem_read_buffer",
-            "mbedtls_pem_read_buffer returned", "hex):", "text):", "mbedtls_x509_crt_parse"
+            "mbedtls_pem_read_buffer returned", "hex):", "text):", "mbedtls_x509_crt_parse",
+            "CA cert full content", "CA section full content", "cert first 50", "cert length"
         ]
         for s in skipSubstrings {
             if message.contains(s) { return false }

@@ -1,5 +1,5 @@
 #!/bin/bash
-# extract_ca_cert.sh - извлекает CA сертификат из .ovpn файла
+# extract_ca_cert.sh - extracts CA certificate from .ovpn file
 
 OVPN_FILE="$1"
 OUTPUT_FILE="${OVPN_FILE}.ca.crt"
@@ -16,8 +16,8 @@ fi
 
 echo "Extracting CA certificate from: $OVPN_FILE"
 
-# Извлекаем секцию <ca>...</ca>
-# Удаляем теги <ca> и </ca>, оставляем только содержимое
+# Extract <ca>...</ca> section
+# Remove <ca> and </ca> tags, keep only the content
 sed -n '/<ca>/,/<\/ca>/p' "$OVPN_FILE" | \
     sed '1d;$d' > "$OUTPUT_FILE"
 
@@ -31,7 +31,7 @@ echo "CA certificate extracted to: $OUTPUT_FILE"
 echo "Certificate length: $(wc -c < "$OUTPUT_FILE") bytes"
 echo "Certificate lines: $(wc -l < "$OUTPUT_FILE")"
 
-# Проверяем наличие BEGIN/END маркеров
+# Check for BEGIN/END markers
 if grep -q "BEGIN CERTIFICATE" "$OUTPUT_FILE"; then
     echo "✓ BEGIN CERTIFICATE marker found"
 else
@@ -41,7 +41,7 @@ fi
 if grep -q "END CERTIFICATE" "$OUTPUT_FILE"; then
     echo "✓ END CERTIFICATE marker found"
     
-    # Проверяем, что после END есть символы
+    # Check that there are characters after END
     END_LINE=$(grep -n "END CERTIFICATE" "$OUTPUT_FILE" | cut -d: -f1)
     TOTAL_LINES=$(wc -l < "$OUTPUT_FILE")
     

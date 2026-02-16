@@ -1,52 +1,52 @@
-# Нет интернета при подключённом VPN — диагностика
+# No internet when VPN is connected — diagnostics
 
-## Что видно по логам
+## What the logs show
 
-- **Пакеты идут:** в логах виден двусторонний обмен (packetFlow ↔ OpenVPN3). Трафик уходит в туннель и приходит обратно.
-- **Настройки туннеля корректны:** gateway=10.50.29.1, IP=10.50.29.2, DNS=8.8.8.8, matchDomains=(nil=all). Маршрут по умолчанию один, дубликатов нет.
+- **Packets are flowing:** logs show two-way exchange (packetFlow ↔ OpenVPN3). Traffic goes into the tunnel and comes back.
+- **Tunnel settings look correct:** gateway=10.50.29.1, IP=10.50.29.2, DNS=8.8.8.8, matchDomains=(nil=all). One default route, no duplicates.
 
-**Вывод:** проблема скорее всего **не в DNS и не в шлюзе на устройстве**. С точки зрения iOS и расширения туннель настроен правильно, трафик в него попадает.
+**Conclusion:** the problem is most likely **not DNS or the gateway on the device**. From iOS and the extension’s perspective the tunnel is set up correctly and traffic enters it.
 
-## Наиболее вероятная причина: сервер VPN
+## Most likely cause: VPN server
 
-Часто «нет интернета» при работающем туннеле связано с тем, что **OpenVPN-сервер не делает NAT/проброс трафика в интернет**.
+Often “no internet” with a working tunnel is because the **OpenVPN server is not doing NAT/forwarding of traffic to the internet**.
 
-Нужно на сервере (185.70.197.119):
+On the server (e.g. 185.70.197.119):
 
-1. **Включить IP forwarding:**
+1. **Enable IP forwarding:**
    ```bash
    sysctl -w net.ipv4.ip_forward=1
    ```
-   (и закрепить в конфиге, например в `/etc/sysctl.conf`.)
+   (and make it persistent in config, e.g. in `/etc/sysctl.conf`.)
 
-2. **Настроить NAT/masquerade** с интерфейса туннеля (например `tun0`) в внешний интерфейс:
+2. **Configure NAT/masquerade** from the tunnel interface (e.g. `tun0`) to the external interface:
    ```bash
    iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-   # или указать конкретно интерфейс туннеля:
+   # or specify the tunnel subnet:
    iptables -t nat -A POSTROUTING -s 10.50.29.0/24 -o eth0 -j MASQUERADE
    ```
 
-Без этого пакеты доходят до сервера, но не уходят в интернет и ответы не возвращаются к клиенту.
+Without this, packets reach the server but do not go out to the internet and responses do not return to the client.
 
-## Как проверить: DNS или маршрутизация
+## How to check: DNS vs routing
 
-1. **Проверка по IP (обход DNS):**  
-   При включённом VPN откройте в браузере по IP, например:
-   - `http://142.250.185.46` (один из IP Google)
-   - или `http://1.1.1.1`
+1. **Check by IP (bypass DNS):**  
+   With VPN on, open in the browser by IP, e.g.:
+   - `http://142.250.185.46` (one of Google’s IPs)
+   - or `http://1.1.1.1`
 
-   - Если по IP страницы **открываются** — проблема в DNS (резолв не идёт/не через туннель).
-   - Если по IP **тоже не открывается** — проблема в маршрутизации/NAT на стороне сервера (трафик не выходит в интернет).
+   - If pages **open by IP** — the issue is DNS (resolution not going through / not via tunnel).
+   - If **by IP it also does not open** — the issue is routing/NAT on the server (traffic not leaving to the internet).
 
-2. **Проверка с другого клиента:**  
-   Подключитесь к тому же OpenVPN-серверу с ПК (OpenVPN GUI / Tunnelblick и т.п.). Если с ПК интернет есть, а с iOS нет — тогда можно копать дальше в сторону iOS/расширения.
+2. **Check from another client:**  
+   Connect to the same OpenVPN server from a PC (OpenVPN GUI, Tunnelblick, etc.). If the PC has internet and iOS does not — then dig further on the iOS/extension side.
 
-## Кратко
+## Summary
 
-| Симптом                         | Вероятная причина                    |
-|---------------------------------|--------------------------------------|
-| Пакеты в логах идут, страницы не открываются | Сервер не делает NAT/forward в интернет |
-| По IP открывается, по имени нет | Проблема с DNS                        |
-| По IP тоже не открывается       | Маршрутизация/NAT на сервере          |
+| Symptom | Likely cause |
+|---------|--------------|
+| Packets in logs, pages do not open | Server not doing NAT/forward to internet |
+| Opens by IP, not by name | DNS issue |
+| Does not open by IP either | Routing/NAT on server |
 
-После настройки NAT и `ip_forward` на сервере переподключите VPN и проверьте снова.
+After configuring NAT and `ip_forward` on the server, reconnect VPN and test again.

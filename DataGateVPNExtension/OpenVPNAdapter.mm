@@ -137,17 +137,7 @@ extern "C" {
                 }
                 
                 printf("[SecurityFramework] ✅ SecCertificateCreateWithData SUCCESS - certificate is valid!\n");
-                saveLogToUserDefaults("INFO", "[SecurityFramework] ✅ Certificate validated by Security Framework");
-                
-                // Get certificate summary for logging
-                CFStringRef summary = SecCertificateCopySubjectSummary(cert);
-                if (summary) {
-                    NSString *summaryStr = (__bridge_transfer NSString *)summary;
-                    char summaryBuf[256];
-                    snprintf(summaryBuf, sizeof(summaryBuf), "[SecurityFramework] Certificate subject: %s", [summaryStr UTF8String]);
-                    saveLogToUserDefaults("INFO", summaryBuf);
-                }
-                
+                saveLogToUserDefaults("INFO", "[SecurityFramework] Certificate validated");
                 CFRelease(cert);
                 return 0; // Success
             } @catch (NSException *exception) {
@@ -198,6 +188,51 @@ static void openvpn_adapter_loaded() {
 #include "mbedtls/error.h"
 
 using namespace openvpn;
+
+/// Remove trailing bytes after each PEM block end marker so mbedTLS (in openvpn3) can parse.
+/// OpenVPN3 submodule is used as-is; we do not patch it, so cleaning is done here.
+static std::string cleanOvpnConfigPemTrailing(const std::string& config) {
+    static const char* end_markers[] = {
+        "-----END CERTIFICATE-----",
+        "-----END RSA PRIVATE KEY-----",
+        "-----END PRIVATE KEY-----",
+        "-----END ENCRYPTED PRIVATE KEY-----",
+    };
+    std::string out;
+    out.reserve(config.size());
+    size_t i = 0;
+    const size_t npos = std::string::npos;
+    while (i < config.size()) {
+        size_t next_end = npos;
+        size_t marker_len = 0;
+        for (const char* m : end_markers) {
+            size_t len = strlen(m);
+            size_t pos = config.find(m, i);
+            if (pos != npos && (next_end == npos || pos < next_end)) {
+                next_end = pos;
+                marker_len = len;
+            }
+        }
+        if (next_end == npos) {
+            out.append(config.substr(i));
+            break;
+        }
+        size_t end_marker_end = next_end + marker_len;
+        out.append(config.substr(i, end_marker_end - i));
+        size_t j = end_marker_end;
+        while (j < config.size() && (config[j] == ' ' || config[j] == '\t' || config[j] == '\r' || config[j] == '\n'))
+            j++;
+        if (j < config.size()) {
+            if (config[j] == '<' || (config.compare(j, 11, "-----BEGIN ") == 0))
+                out.push_back('\n');
+            i = j;
+        } else {
+            break;
+        }
+    }
+    return out;
+}
+
 using namespace openvpn::ClientAPI;
 
 // Route information structure
@@ -1688,11 +1723,7 @@ private:
                     return;
                 }
                 
-                // Log config preview (first 500 chars)
-                NSLog(@"[OpenVPNAdapter]    Config preview (first 500 chars):\n%@", 
-                      [configContent substringToIndex:MIN(500, configContent.length)]);
-                
-                NSLog(@"[OpenVPNAdapter] Step 4.1: Converting config to UTF-8...");
+                NSLog(@"[OpenVPNAdapter] Step 4.1: Converting config to UTF-8 (%lu bytes)...", (unsigned long)configContent.length);
                 Config config;
                 std::string configStr = std::string([configContent UTF8String]);
                 NSLog(@"[OpenVPNAdapter]    Config string length: %zu bytes", configStr.length());
@@ -1712,51 +1743,28 @@ private:
                 }
                 NSLog(@"[OpenVPNAdapter] ✅ UTF-8 conversion successful");
                 
-                // Check for CA certificate in config
-                NSLog(@"[OpenVPNAdapter] Step 4.2: Analyzing config structure...");
+                // Check for CA certificate in config (log only presence/size, never cert content)
                 size_t caPos = configStr.find("<ca>");
                 size_t caEndPos = configStr.find("</ca>");
                 if (caPos != std::string::npos && caEndPos != std::string::npos) {
-                    NSLog(@"[OpenVPNAdapter]    ✅ Found <ca> tag at position %zu", caPos);
-                    NSLog(@"[OpenVPNAdapter]    ✅ Found </ca> tag at position %zu", caEndPos);
-                    
                     size_t caCertStart = configStr.find("-----BEGIN CERTIFICATE-----", caPos);
                     size_t caCertEnd = configStr.find("-----END CERTIFICATE-----", caPos);
                     if (caCertStart != std::string::npos && caCertEnd != std::string::npos) {
                         size_t caCertLen = caCertEnd - caCertStart + strlen("-----END CERTIFICATE-----");
-                        NSLog(@"[OpenVPNAdapter]    ✅ Found CA certificate: %zu bytes (pos %zu-%zu)", 
-                              caCertLen, caCertStart, caCertEnd);
-                        std::string caCert = configStr.substr(caCertStart, caCertLen);
-                        NSLog(@"[OpenVPNAdapter]    CA cert full content (%zu bytes):\n%s", 
-                              caCert.length(), caCert.c_str());
-                        
-                        // Check for newlines in certificate
-                        size_t newlineCount = std::count(caCert.begin(), caCert.end(), '\n');
-                        NSLog(@"[OpenVPNAdapter]    CA cert has %zu newlines", newlineCount);
-                    } else {
-                        NSLog(@"[OpenVPNAdapter]    ⚠️ CA tag found but certificate markers not found");
-                        NSLog(@"[OpenVPNAdapter]    BEGIN marker at: %zu", caCertStart);
-                        NSLog(@"[OpenVPNAdapter]    END marker at: %zu", caCertEnd);
+                        NSLog(@"[OpenVPNAdapter] Step 4.2: CA certificate in config: %zu bytes", caCertLen);
                     }
-                } else {
-                    NSLog(@"[OpenVPNAdapter]    ⚠️ CA certificate section not found in config");
-                    NSLog(@"[OpenVPNAdapter]    <ca> tag at: %zu", caPos);
-                    NSLog(@"[OpenVPNAdapter]    </ca> tag at: %zu", caEndPos);
                 }
                 
-                NSLog(@"[OpenVPNAdapter] Step 4.3: Following DataGateWin approach - NO normalization");
-                // CRITICAL: Following DataGateWin/VpnClient.cpp implementation (line 130)
-                // They pass config AS-IS: cfg.content = ovpnContent; (no normalization!)
-                // OpenVPN3 will handle CA cert parsing itself via opt.cat("ca") and load_ca()
-                // We do the same - pass original config without any modifications
+                // Clean PEM blocks: remove trailing bytes after each -----END CERTIFICATE----- etc.
+                // so mbedTLS inside openvpn3 can parse (we use openvpn3 submodule as-is, no patches).
+                std::string cleanedConfig = cleanOvpnConfigPemTrailing(configStr);
+                if (cleanedConfig.length() != configStr.length()) {
+                    NSLog(@"[OpenVPNAdapter] Step 4.3: Cleaned PEM trailing bytes: %zu -> %zu bytes", configStr.length(), cleanedConfig.length());
+                }
                 
                 NSLog(@"[OpenVPNAdapter] Step 4.4: Setting config parameters...");
-                // CRITICAL: Following DataGateWin implementation - pass config AS-IS without any normalization
-                // In DataGateWin/VpnClient.cpp line 130: cfg.content = ovpnContent; (no normalization!)
-                // OpenVPN3 will handle CA cert parsing itself via opt.cat("ca") and load_ca()
-                config.content = configStr; // Pass original config directly, just like Windows version
-                printf("[OpenVPNAdapter] ✅ Using ORIGINAL config (no normalization, like DataGateWin), length = %zu bytes\n", configStr.length());
-                NSLog(@"[OpenVPNAdapter] ✅ Using ORIGINAL config (no normalization, like DataGateWin), length = %zu bytes", configStr.length());
+                config.content = cleanedConfig;
+                NSLog(@"[OpenVPNAdapter] ✅ Config set (PEM-cleaned), length = %zu bytes", cleanedConfig.length());
                 config.serverOverride = ""; // Use server from config
                 config.connTimeout = 30;
                 config.protoOverride = ""; // Use protocol from config (udp/tcp)
@@ -1785,52 +1793,6 @@ private:
                     [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
                     [[NSUserDefaults standardUserDefaults] synchronize];
                 } @catch (...) {}
-                
-                // Log original config CA certificate format before eval_config (for diagnostics only)
-                // Following DataGateWin - we pass config AS-IS, but log for debugging
-                // Reuse caPos and caEndPos from Step 4.2 above
-                if (caPos != std::string::npos && caEndPos != std::string::npos) {
-                    size_t caCertStart = configStr.find("-----BEGIN CERTIFICATE-----", caPos);
-                    size_t caCertEnd = configStr.find("-----END CERTIFICATE-----", caPos);
-                    if (caCertStart != std::string::npos && caCertEnd != std::string::npos) {
-                        std::string caCertRaw = configStr.substr(caCertStart, caCertEnd - caCertStart + strlen("-----END CERTIFICATE-----"));
-                        printf("========================================\n");
-                        printf("[OpenVPNAdapter] ORIGINAL CA CERTIFICATE (will be passed to OpenVPN3 AS-IS, like DataGateWin)\n");
-                        printf("[OpenVPNAdapter] CA cert length: %zu bytes\n", caCertRaw.length());
-                        printf("[OpenVPNAdapter] CA cert full content:\n%s\n", caCertRaw.c_str());
-                        
-                        // Count newlines after END marker
-                        size_t endMarkerPos = caCertRaw.find("-----END CERTIFICATE-----");
-                        if (endMarkerPos != std::string::npos) {
-                            std::string afterEnd = caCertRaw.substr(endMarkerPos + strlen("-----END CERTIFICATE-----"));
-                            size_t newlineCount = std::count(afterEnd.begin(), afterEnd.end(), '\n');
-                            size_t crCount = std::count(afterEnd.begin(), afterEnd.end(), '\r');
-                            printf("[OpenVPNAdapter] Newlines after END: %zu, CRs: %zu\n", newlineCount, crCount);
-                            printf("[OpenVPNAdapter] After END marker (hex): ");
-                            for (size_t i = 0; i < std::min(afterEnd.length(), (size_t)10); i++) {
-                                printf("%02x ", (unsigned char)afterEnd[i]);
-                            }
-                            printf("\n");
-                            
-                            // Note: opt.cat("ca") will extract this and pass to load_ca()
-                            printf("[OpenVPNAdapter] OpenVPN3 will extract via opt.cat(\"ca\") and pass to load_ca()\n");
-                        }
-                        printf("========================================\n");
-                        
-                        // Save to UserDefaults
-                        @try {
-                            NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                            [logs addObject:@{
-                                @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                @"level": @"INFO",
-                                @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] Original CA cert: %zu bytes, %zu newlines after END", caCertRaw.length(), std::count(caCertRaw.begin() + caCertRaw.find("-----END CERTIFICATE-----") + strlen("-----END CERTIFICATE-----"), caCertRaw.end(), '\n')]
-                            }];
-                            if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                            [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                            [[NSUserDefaults standardUserDefaults] synchronize];
-                        } @catch (...) {}
-                    }
-                }
                 
                 // Evaluate config - wrap in try/catch to catch C++ exceptions from openvpn3
                 EvalConfig evalConfig;
@@ -1944,663 +1906,17 @@ private:
                 NSString *protoStr = [NSString stringWithUTF8String:evalConfig.remoteProto.c_str()];
                 NSLog(@"[OpenVPNAdapter]    Protocol: %@", protoStr);
                 
-                // CRITICAL: Log CA certificate content that will be passed to mbedTLS during connect()
-                NSLog(@"[OpenVPNAdapter] 🔍 Starting CA certificate analysis before connect()...");
-                printf("========================================\n");
-                printf("[OpenVPNAdapter] 🔍 CA CERTIFICATE ANALYSIS BEFORE CONNECT()\n");
-                printf("========================================\n");
-                
-                // Verify configStr hasn't changed after eval_config() (for diagnostics)
-                printf("[OpenVPNAdapter] ⚠️ VERIFYING configStr after eval_config()\n");
-                printf("[OpenVPNAdapter] configStr length: %zu bytes\n", configStr.length());
-                
-                // Check if <ca> tag exists
-                size_t checkCaBeforeSearch = configStr.find("<ca>");
-                printf("[OpenVPNAdapter] Quick check: <ca> tag found at %zu\n", checkCaBeforeSearch);
-                
-                // Log configStr state (first/last 500 chars)
-                printf("[OpenVPNAdapter] configStr first 500 chars:\n%.500s\n", configStr.c_str());
-                if (configStr.length() > 500) {
-                    printf("[OpenVPNAdapter] configStr last 500 chars:\n%s\n", configStr.substr(configStr.length() - 500).c_str());
-                }
-                
-                // Save log to UserDefaults immediately - CRITICAL for debugging
-                @try {
-                    NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                    [logs addObject:@{
-                        @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                        @"level": @"INFO",
-                        @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] 🔍 Starting CA certificate analysis before connect()... configStr length: %zu bytes", configStr.length()]
-                    }];
-                    [logs addObject:@{
-                        @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                        @"level": @"INFO",
-                        @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] Quick check: <ca> tag found at %zu", checkCaBeforeSearch]
-                    }];
-                    if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                    [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                    [[NSUserDefaults standardUserDefaults] synchronize];
-                    printf("[OpenVPNAdapter] ✅ Pre-search logs saved to UserDefaults (total logs: %zu)\n", (size_t)logs.count);
-                } @catch (NSException *e) {
-                    printf("[OpenVPNAdapter] ❌ Failed to save pre-search logs: %s\n", [e.reason UTF8String]);
-                }
-                
+                // Config evaluated; no cert/config content logged (security)
                 size_t finalCaPos = configStr.find("<ca>");
                 size_t finalCaEndPos = configStr.find("</ca>");
-                
-                printf("[OpenVPNAdapter] ⚠️ SEARCH RESULTS: <ca> at %zu, </ca> at %zu\n", finalCaPos, finalCaEndPos);
-                
-                printf("[OpenVPNAdapter] Searching for <ca> tag: found at %zu\n", finalCaPos);
-                printf("[OpenVPNAdapter] Searching for </ca> tag: found at %zu\n", finalCaEndPos);
-                
-                // Save search results to UserDefaults
-                @try {
-                    NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                    [logs addObject:@{
-                        @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                        @"level": @"INFO",
-                        @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] Searching for <ca> tag: found at %zu", finalCaPos]
-                    }];
-                    [logs addObject:@{
-                        @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                        @"level": @"INFO",
-                        @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] Searching for </ca> tag: found at %zu", finalCaEndPos]
-                    }];
-                    if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                    [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                    [[NSUserDefaults standardUserDefaults] synchronize];
-                } @catch (...) {}
-                
                 if (finalCaPos != std::string::npos && finalCaEndPos != std::string::npos) {
-                    NSLog(@"[OpenVPNAdapter] ✅ Found CA section in config");
-                    printf("[OpenVPNAdapter] ✅ CA section found: <ca> at %zu, </ca> at %zu\n", finalCaPos, finalCaEndPos);
-                    
-                    // Log config around CA tags
-                    size_t previewStart = finalCaPos > 100 ? finalCaPos - 100 : 0;
-                    size_t previewLen = MIN(500, configStr.length() - previewStart);
-                    printf("[OpenVPNAdapter] Config around <ca> tag (pos %zu):\n%.*s\n", finalCaPos, (int)previewLen, configStr.c_str() + previewStart);
-                    
-                    size_t finalCaSectionStart = finalCaPos + 4; // After "<ca>"
-                    size_t finalCaSectionEnd = finalCaEndPos;
-                    
-                    if (finalCaSectionEnd <= finalCaSectionStart) {
-                        printf("[OpenVPNAdapter] ❌ ERROR: finalCaSectionEnd (%zu) <= finalCaSectionStart (%zu)\n", finalCaSectionEnd, finalCaSectionStart);
-                        NSLog(@"[OpenVPNAdapter] ❌ ERROR: Invalid CA section boundaries");
-                        
-                        // Save error to UserDefaults
-                        @try {
-                            NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                            [logs addObject:@{
-                                @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                @"level": @"ERROR",
-                                @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] ❌ ERROR: Invalid CA section boundaries: finalCaSectionEnd (%zu) <= finalCaSectionStart (%zu)", finalCaSectionEnd, finalCaSectionStart]
-                            }];
-                            if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                            [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                            [[NSUserDefaults standardUserDefaults] synchronize];
-                        } @catch (...) {}
-                    } else {
-                        std::string finalCaSection = configStr.substr(finalCaSectionStart, finalCaSectionEnd - finalCaSectionStart);
-                        
-                        printf("[OpenVPNAdapter] CA section length: %zu bytes\n", finalCaSection.length());
-                        printf("[OpenVPNAdapter] CA section starts at: %zu, ends at: %zu\n", finalCaSectionStart, finalCaSectionEnd);
-                        printf("[OpenVPNAdapter] CA section full content:\n%s\n", finalCaSection.c_str());
-                        
-                        // Save CA section info to UserDefaults
-                        @try {
-                            NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                            [logs addObject:@{
-                                @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                @"level": @"INFO",
-                                @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] CA section found: length %zu bytes, starts at %zu, ends at %zu", finalCaSection.length(), finalCaSectionStart, finalCaSectionEnd]
-                            }];
-                            NSString *caSectionStr = [NSString stringWithUTF8String:finalCaSection.c_str()];
-                            [logs addObject:@{
-                                @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                @"level": @"INFO",
-                                @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] CA section full content (%zu bytes):\n%@", finalCaSection.length(), caSectionStr]
-                            }];
-                            if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                            [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                            [[NSUserDefaults standardUserDefaults] synchronize];
-                        } @catch (...) {}
-                        
-                        // Find certificate boundaries
-                        size_t finalBeginPos = finalCaSection.find("-----BEGIN CERTIFICATE-----");
-                        size_t finalEndPos = finalCaSection.find("-----END CERTIFICATE-----");
-                        
-                        // Log certificate marker search results
-                        printf("[OpenVPNAdapter] Searching for BEGIN marker in CA section: found at %zu\n", finalBeginPos);
-                        printf("[OpenVPNAdapter] Searching for END marker in CA section: found at %zu\n", finalEndPos);
-                        
-                        @try {
-                            NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                            [logs addObject:@{
-                                @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                @"level": @"INFO",
-                                @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] Searching for BEGIN marker in CA section: found at %zu", finalBeginPos]
-                            }];
-                            [logs addObject:@{
-                                @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                @"level": @"INFO",
-                                @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] Searching for END marker in CA section: found at %zu", finalEndPos]
-                            }];
-                            if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                            [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                            [[NSUserDefaults standardUserDefaults] synchronize];
-                        } @catch (...) {}
-                        
-                        // CRITICAL: Declare finalCaCert OUTSIDE the if block so it's accessible later
-                        std::string finalCaCert;
-                        bool certExtracted = false;
-                        
-                        if (finalBeginPos != std::string::npos && finalEndPos != std::string::npos) {
-                        // CRITICAL: Calculate certificate length correctly
-                        size_t finalCertLen = finalEndPos - finalBeginPos + strlen("-----END CERTIFICATE-----");
-                        printf("[OpenVPNAdapter] ⚠️ EXTRACTING CERTIFICATE:\n");
-                        printf("[OpenVPNAdapter] finalBeginPos: %zu\n", finalBeginPos);
-                        printf("[OpenVPNAdapter] finalEndPos: %zu\n", finalEndPos);
-                        printf("[OpenVPNAdapter] END marker length: %zu\n", strlen("-----END CERTIFICATE-----"));
-                        printf("[OpenVPNAdapter] Calculated cert length: %zu bytes\n", finalCertLen);
-                        printf("[OpenVPNAdapter] CA section length: %zu bytes\n", finalCaSection.length());
-                        
-                        // Save extraction calculation to UserDefaults
-                        @try {
-                            NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                            [logs addObject:@{
-                                @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                @"level": @"INFO",
-                                @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] EXTRACTING: BEGIN at %zu, END at %zu, calculated length %zu, CA section length %zu", finalBeginPos, finalEndPos, finalCertLen, finalCaSection.length()]
-                            }];
-                            if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                            [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                            [[NSUserDefaults standardUserDefaults] synchronize];
-                        } @catch (...) {}
-                        
-                        // Check bounds
-                        if (finalBeginPos + finalCertLen > finalCaSection.length()) {
-                            printf("[OpenVPNAdapter] ❌ ERROR: finalBeginPos (%zu) + finalCertLen (%zu) = %zu > finalCaSection.length() (%zu)\n", 
-                                   finalBeginPos, finalCertLen, finalBeginPos + finalCertLen, finalCaSection.length());
-                            finalCertLen = finalCaSection.length() - finalBeginPos; // Adjust to fit
-                            printf("[OpenVPNAdapter] Adjusted cert length to: %zu bytes\n", finalCertLen);
-                            
-                            @try {
-                                NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                                [logs addObject:@{
-                                    @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                    @"level": @"ERROR",
-                                    @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] ❌ BOUNDS ERROR: Adjusted cert length to %zu bytes", finalCertLen]
-                                }];
-                                if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                                [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                                [[NSUserDefaults standardUserDefaults] synchronize];
-                            } @catch (...) {}
-                        }
-                        
-                        // Extract certificate
-                        printf("[OpenVPNAdapter] ШАГ 1: Начинаю извлечение сертификата\n");
-                        NSLog(@"[OpenVPNAdapter] ШАГ 1: Начинаю извлечение сертификата");
-                        @try {
-                            NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                            [logs addObject:@{
-                                @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                @"level": @"INFO",
-                                @"message": @"[OpenVPNAdapter] ШАГ 1: Начинаю извлечение сертификата"
-                            }];
-                            if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                            [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                            [[NSUserDefaults standardUserDefaults] synchronize];
-                        } @catch (...) {}
-                        
-                        finalCaCert = finalCaSection.substr(finalBeginPos, finalCertLen);
-                        printf("[OpenVPNAdapter] ШАГ 2: Извлечен сертификат, длина = %zu байт\n", finalCaCert.length());
-                        NSLog(@"[OpenVPNAdapter] ШАГ 2: Извлечен сертификат, длина = %zu байт", finalCaCert.length());
-                        @try {
-                            NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                            [logs addObject:@{
-                                @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                @"level": @"INFO",
-                                @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] ШАГ 2: Извлечен сертификат, длина = %zu байт", finalCaCert.length()]
-                            }];
-                            if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                            [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                            [[NSUserDefaults standardUserDefaults] synchronize];
-                        } @catch (...) {}
-                        
-                        // CRITICAL: Remove leading newline if present (CA section starts with \n)
-                        if (!finalCaCert.empty() && finalCaCert[0] == '\n') {
-                            printf("[OpenVPNAdapter] ШАГ 3: Удаляю начальный \\n\n");
-                            NSLog(@"[OpenVPNAdapter] ШАГ 3: Удаляю начальный \\n");
-                            @try {
-                                NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                                [logs addObject:@{
-                                    @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                    @"level": @"INFO",
-                                    @"message": @"[OpenVPNAdapter] ШАГ 3: Удаляю начальный \\n"
-                                }];
-                                if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                                [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                                [[NSUserDefaults standardUserDefaults] synchronize];
-                            } @catch (...) {}
-                            finalCaCert = finalCaCert.substr(1);
-                            printf("[OpenVPNAdapter] ШАГ 4: После удаления начального \\n, длина = %zu байт\n", finalCaCert.length());
-                            NSLog(@"[OpenVPNAdapter] ШАГ 4: После удаления начального \\n, длина = %zu байт", finalCaCert.length());
-                            @try {
-                                NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                                [logs addObject:@{
-                                    @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                    @"level": @"INFO",
-                                    @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] ШАГ 4: После удаления начального \\n, длина = %zu байт", finalCaCert.length()]
-                                }];
-                                if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                                [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                                [[NSUserDefaults standardUserDefaults] synchronize];
-                            } @catch (...) {}
-                        } else {
-                            printf("[OpenVPNAdapter] ШАГ 3: Начального \\n нет, пропускаю\n");
-                            NSLog(@"[OpenVPNAdapter] ШАГ 3: Начального \\n нет, пропускаю");
-                            @try {
-                                NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                                [logs addObject:@{
-                                    @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                    @"level": @"INFO",
-                                    @"message": @"[OpenVPNAdapter] ШАГ 3: Начального \\n нет, пропускаю"
-                                }];
-                                if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                                [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                                [[NSUserDefaults standardUserDefaults] synchronize];
-                            } @catch (...) {}
-                        }
-                        
-                        // CRITICAL: Remove trailing newline if present
-                        if (!finalCaCert.empty() && finalCaCert[finalCaCert.length() - 1] == '\n') {
-                            printf("[OpenVPNAdapter] ШАГ 5: Удаляю конечный \\n\n");
-                            NSLog(@"[OpenVPNAdapter] ШАГ 5: Удаляю конечный \\n");
-                            @try {
-                                NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                                [logs addObject:@{
-                                    @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                    @"level": @"INFO",
-                                    @"message": @"[OpenVPNAdapter] ШАГ 5: Удаляю конечный \\n"
-                                }];
-                                if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                                [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                                [[NSUserDefaults standardUserDefaults] synchronize];
-                            } @catch (...) {}
-                            finalCaCert = finalCaCert.substr(0, finalCaCert.length() - 1);
-                            printf("[OpenVPNAdapter] ШАГ 6: После удаления конечного \\n, длина = %zu байт\n", finalCaCert.length());
-                            NSLog(@"[OpenVPNAdapter] ШАГ 6: После удаления конечного \\n, длина = %zu байт", finalCaCert.length());
-                            @try {
-                                NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                                [logs addObject:@{
-                                    @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                    @"level": @"INFO",
-                                    @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] ШАГ 6: После удаления конечного \\n, длина = %zu байт", finalCaCert.length()]
-                                }];
-                                if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                                [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                                [[NSUserDefaults standardUserDefaults] synchronize];
-                            } @catch (...) {}
-                        } else {
-                            printf("[OpenVPNAdapter] ШАГ 5: Конечного \\n нет, пропускаю\n");
-                            NSLog(@"[OpenVPNAdapter] ШАГ 5: Конечного \\n нет, пропускаю");
-                            @try {
-                                NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                                [logs addObject:@{
-                                    @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                    @"level": @"INFO",
-                                    @"message": @"[OpenVPNAdapter] ШАГ 5: Конечного \\n нет, пропускаю"
-                                }];
-                                if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                                [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                                [[NSUserDefaults standardUserDefaults] synchronize];
-                            } @catch (...) {}
-                        }
-                        
-                        certExtracted = true;
-                        printf("[OpenVPNAdapter] ШАГ 7: certExtracted = true, длина сертификата = %zu байт\n", finalCaCert.length());
-                        NSLog(@"[OpenVPNAdapter] ШАГ 7: certExtracted = true, длина сертификата = %zu байт", finalCaCert.length());
-                        @try {
-                            NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                            [logs addObject:@{
-                                @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                @"level": @"INFO",
-                                @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] ШАГ 7: certExtracted = true, длина сертификата = %zu байт", finalCaCert.length()]
-                            }];
-                            if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                            [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                            [[NSUserDefaults standardUserDefaults] synchronize];
-                        } @catch (...) {}
-                        printf("[OpenVPNAdapter] CA cert first 50 chars: ");
-                        for (size_t i = 0; i < MIN(50, finalCaCert.length()); i++) {
-                            printf("%c", finalCaCert[i]);
-                        }
-                        printf("\n");
-                        
-                        // CRITICAL: Save to UserDefaults IMMEDIATELY with printf to ensure it's logged
-                        printf("[OpenVPNAdapter] 🔍 SAVING TO USERDEFAULTS: certExtracted = %d, finalCaCert.length() = %zu\n", certExtracted, finalCaCert.length());
-                        NSLog(@"[OpenVPNAdapter] 🔍 SAVING TO USERDEFAULTS: certExtracted = %d, finalCaCert.length() = %zu", certExtracted, finalCaCert.length());
-                        
-                        // Save extraction info to UserDefaults IMMEDIATELY
-                        @try {
-                            NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                            [logs addObject:@{
-                                @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                @"level": @"INFO",
-                                @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] ✅ IMMEDIATELY AFTER EXTRACTION: CA cert length = %zu bytes", finalCaCert.length()]
-                            }];
-                            NSString *certFirst50 = [NSString stringWithUTF8String:finalCaCert.substr(0, MIN(50, finalCaCert.length())).c_str()];
-                            [logs addObject:@{
-                                @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                @"level": @"INFO",
-                                @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] CA cert first 50 chars: %@", certFirst50]
-                            }];
-                            if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                            [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                            [[NSUserDefaults standardUserDefaults] synchronize];
-                        } @catch (...) {}
-                        
-                        // EXPERIMENT: REMOVED test mbedTLS parsing - let OpenVPN3 handle it
-                        // OpenVPN3 will extract CA cert via opt.cat("ca") and parse it itself
-                        // Our test parsing may interfere or use different mbedTLS context
-                        printf("[OpenVPNAdapter] ⚠️ EXPERIMENT: Skipping test mbedTLS parsing - letting OpenVPN3 handle CA cert parsing\n");
-                        NSLog(@"[OpenVPNAdapter] ⚠️ EXPERIMENT: Skipping test mbedTLS parsing - letting OpenVPN3 handle CA cert parsing");
-                        @try {
-                            NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                            [logs addObject:@{
-                                @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                @"level": @"INFO",
-                                @"message": @"[OpenVPNAdapter] ⚠️ EXPERIMENT: Skipping test mbedTLS parsing - letting OpenVPN3 handle CA cert parsing"
-                            }];
-                            if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                            [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                            [[NSUserDefaults standardUserDefaults] synchronize];
-                        } @catch (...) {}
-                        
-                        printf("[OpenVPNAdapter] CA cert extracted: certExtracted = %d, finalCaCert.length() = %zu\n", certExtracted, finalCaCert.length());
-                        NSLog(@"[OpenVPNAdapter] CA cert extracted: certExtracted = %d, finalCaCert.length() = %zu", certExtracted, finalCaCert.length());
-                        
-                        @try {
-                            NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                            [logs addObject:@{
-                                @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                @"level": @"INFO",
-                                @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] AFTER mbedTLS TEST: certExtracted = %d, finalCaCert.length() = %zu", certExtracted, finalCaCert.length()]
-                            }];
-                            if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                            [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                            [[NSUserDefaults standardUserDefaults] synchronize];
-                        } @catch (...) {}
-                        
-                        // Log full CA cert ONLY if it's not empty
-                        if (!finalCaCert.empty()) {
-                            printf("[OpenVPNAdapter] CA cert full content (%zu bytes):\n", finalCaCert.length());
-                            for (size_t i = 0; i < finalCaCert.length(); i++) {
-                                char c = finalCaCert[i];
-                                if (c >= 32 && c <= 126) {
-                                    printf("%c", c);
-                                } else if (c == '\n') {
-                                    printf("\\n");
-                                } else if (c == '\r') {
-                                    printf("\\r");
-                                } else {
-                                    printf("\\x%02x", (unsigned char)c);
-                                }
-                            }
-                            printf("\n");
-                        } else {
-                            printf("[OpenVPNAdapter] ❌ CA cert is EMPTY after mbedTLS test!\n");
-                            NSLog(@"[OpenVPNAdapter] ❌ CA cert is EMPTY after mbedTLS test!");
-                        }
-                        
-                        // CRITICAL: Verify certExtracted flag and finalCaCert state BEFORE using it
-                        printf("[OpenVPNAdapter] ШАГ 14: ПЕРЕД подсчетом символов: certExtracted = %d, finalCaCert.length() = %zu\n", certExtracted, finalCaCert.length());
-                        NSLog(@"[OpenVPNAdapter] ШАГ 14: ПЕРЕД подсчетом символов: certExtracted = %d, finalCaCert.length() = %zu", certExtracted, finalCaCert.length());
-                        @try {
-                            NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                            [logs addObject:@{
-                                @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                @"level": @"INFO",
-                                @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] ШАГ 14: ПЕРЕД подсчетом символов: certExtracted = %d, finalCaCert.length() = %zu", certExtracted, finalCaCert.length()]
-                            }];
-                            if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                            [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                            [[NSUserDefaults standardUserDefaults] synchronize];
-                        } @catch (...) {}
-                        
-                        if (!certExtracted || finalCaCert.empty()) {
-                            printf("[OpenVPNAdapter] ШАГ 15: ОШИБКА! finalCaCert пустой! certExtracted = %d, length = %zu\n", certExtracted, finalCaCert.length());
-                            NSLog(@"[OpenVPNAdapter] ШАГ 15: ОШИБКА! finalCaCert пустой! certExtracted = %d, length = %zu", certExtracted, finalCaCert.length());
-                            @try {
-                                NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                                [logs addObject:@{
-                                    @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                    @"level": @"ERROR",
-                                    @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] ШАГ 15: ОШИБКА! finalCaCert пустой! certExtracted = %d, length = %zu", certExtracted, finalCaCert.length()]
-                                }];
-                                if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                                [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                                [[NSUserDefaults standardUserDefaults] synchronize];
-                            } @catch (...) {}
-                            
-                            @try {
-                                NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                                [logs addObject:@{
-                                    @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                    @"level": @"ERROR",
-                                    @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] ❌ CRITICAL ERROR: finalCaCert is empty! certExtracted = %d, length = %zu", certExtracted, finalCaCert.length()]
-                                }];
-                                if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                                [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                                [[NSUserDefaults standardUserDefaults] synchronize];
-                            } @catch (...) {}
-                        } else {
-                            printf("[OpenVPNAdapter] ШАГ 16: Сертификат НЕ пустой, начинаю подсчет символов\n");
-                            NSLog(@"[OpenVPNAdapter] ШАГ 16: Сертификат НЕ пустой, начинаю подсчет символов");
-                            @try {
-                                NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                                [logs addObject:@{
-                                    @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                    @"level": @"INFO",
-                                    @"message": @"[OpenVPNAdapter] ШАГ 16: Сертификат НЕ пустой, начинаю подсчет символов"
-                                }];
-                                if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                                [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                                [[NSUserDefaults standardUserDefaults] synchronize];
-                            } @catch (...) {}
-                            // Count characters after END marker
-                            size_t endMarkerEnd = finalEndPos + strlen("-----END CERTIFICATE-----");
-                            size_t trailingChars = 0;
-                            if (endMarkerEnd < finalCaCert.length()) {
-                                trailingChars = finalCaCert.length() - endMarkerEnd;
-                            } else {
-                                printf("[OpenVPNAdapter] ШАГ 17: Предупреждение: endMarkerEnd (%zu) >= cert length (%zu)\n", endMarkerEnd, finalCaCert.length());
-                                NSLog(@"[OpenVPNAdapter] ШАГ 17: Предупреждение: endMarkerEnd (%zu) >= cert length (%zu)", endMarkerEnd, finalCaCert.length());
-                                @try {
-                                    NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                                    [logs addObject:@{
-                                        @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                        @"level": @"WARNING",
-                                        @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] ШАГ 17: Предупреждение: endMarkerEnd (%zu) >= cert length (%zu)", endMarkerEnd, finalCaCert.length()]
-                                    }];
-                                    if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                                    [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                                    [[NSUserDefaults standardUserDefaults] synchronize];
-                                } @catch (...) {}
-                            }
-                            printf("[OpenVPNAdapter] ШАГ 18: Символов после END маркера: %zu\n", trailingChars);
-                            NSLog(@"[OpenVPNAdapter] ШАГ 18: Символов после END маркера: %zu", trailingChars);
-                            @try {
-                                NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                                [logs addObject:@{
-                                    @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                    @"level": @"INFO",
-                                    @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] ШАГ 18: Символов после END маркера: %zu", trailingChars]
-                                }];
-                                if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                                [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                                [[NSUserDefaults standardUserDefaults] synchronize];
-                            } @catch (...) {}
-                            if (trailingChars > 0) {
-                                printf("[OpenVPNAdapter] Trailing content: ");
-                                for (size_t i = endMarkerEnd; i < finalCaCert.length(); i++) {
-                                    char c = finalCaCert[i];
-                                    if (c == '\n') {
-                                        printf("\\n");
-                                    } else if (c == '\r') {
-                                        printf("\\r");
-                                    } else if (c == ' ') {
-                                        printf("SPACE");
-                                    } else if (c == '\t') {
-                                        printf("TAB");
-                                    } else {
-                                        printf("\\x%02x", (unsigned char)c);
-                                    }
-                                }
-                                printf("\n");
-                            }
-                            
-                            // Count newlines
-                            printf("[OpenVPNAdapter] ШАГ 19: Подсчитываю символы \\n и \\r\n");
-                            NSLog(@"[OpenVPNAdapter] ШАГ 19: Подсчитываю символы \\n и \\r");
-                            @try {
-                                NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                                [logs addObject:@{
-                                    @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                    @"level": @"INFO",
-                                    @"message": @"[OpenVPNAdapter] ШАГ 19: Подсчитываю символы \\n и \\r"
-                                }];
-                                if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                                [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                                [[NSUserDefaults standardUserDefaults] synchronize];
-                            } @catch (...) {}
-                            size_t newlineCount = std::count(finalCaCert.begin(), finalCaCert.end(), '\n');
-                            size_t crCount = std::count(finalCaCert.begin(), finalCaCert.end(), '\r');
-                            printf("[OpenVPNAdapter] ШАГ 20: Newlines (\\n): %zu, CRs (\\r): %zu\n", newlineCount, crCount);
-                            NSLog(@"[OpenVPNAdapter] ШАГ 20: Newlines (\\n): %zu, CRs (\\r): %zu", newlineCount, crCount);
-                            @try {
-                                NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                                [logs addObject:@{
-                                    @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                    @"level": @"INFO",
-                                    @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] ШАГ 20: Newlines (\\n): %zu, CRs (\\r): %zu", newlineCount, crCount]
-                                }];
-                                if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                                [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                                [[NSUserDefaults standardUserDefaults] synchronize];
-                            } @catch (...) {}
-                            
-                            // Build detailed log message
-                            printf("[OpenVPNAdapter] ШАГ 21: Формирую финальное сообщение о сертификате\n");
-                            NSLog(@"[OpenVPNAdapter] ШАГ 21: Формирую финальное сообщение о сертификате");
-                            @try {
-                                NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                                [logs addObject:@{
-                                    @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                    @"level": @"INFO",
-                                    @"message": @"[OpenVPNAdapter] ШАГ 21: Формирую финальное сообщение о сертификате"
-                                }];
-                                if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                                [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                                [[NSUserDefaults standardUserDefaults] synchronize];
-                            } @catch (...) {}
-                            NSString *caCertInfo = [NSString stringWithFormat:@"[OpenVPNAdapter] CA cert before connect: %zu bytes, %zu newlines, %zu CRs, %zu trailing chars after END", 
-                                                   finalCaCert.length(), newlineCount, crCount, trailingChars];
-                            NSLog(@"%@", caCertInfo);
-                            printf("[OpenVPNAdapter] ШАГ 22: Финальное сообщение создано, длина сертификата = %zu байт\n", finalCaCert.length());
-                            NSLog(@"[OpenVPNAdapter] ШАГ 22: Финальное сообщение создано, длина сертификата = %zu байт", finalCaCert.length());
-                            @try {
-                                NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                                [logs addObject:@{
-                                    @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                    @"level": @"INFO",
-                                    @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] ШАГ 22: Финальное сообщение создано, длина сертификата = %zu байт", finalCaCert.length()]
-                                }];
-                                if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                                [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                                [[NSUserDefaults standardUserDefaults] synchronize];
-                            } @catch (...) {}
-                            
-                            // Log full CA cert
-                            NSString *fullCaCert = [NSString stringWithUTF8String:finalCaCert.c_str()];
-                            NSLog(@"[OpenVPNAdapter] CA cert full content (%zu bytes):\n%@", finalCaCert.length(), fullCaCert);
-                            
-                            // Save to UserDefaults with full certificate
-                            @try {
-                                NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                                [logs addObject:@{
-                                    @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                    @"level": @"INFO",
-                                    @"message": caCertInfo
-                                }];
-                                [logs addObject:@{
-                                    @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                    @"level": @"INFO",
-                                    @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] CA cert full content (%zu bytes):\n%@", finalCaCert.length(), fullCaCert]
-                                }];
-                                if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                                [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                                [[NSUserDefaults standardUserDefaults] synchronize];
-                                NSLog(@"[OpenVPNAdapter] ✅ CA cert analysis saved to UserDefaults");
-                            } @catch (...) {
-                                NSLog(@"[OpenVPNAdapter] ❌ Failed to save CA cert analysis to UserDefaults");
-                            }
-                        }
-                    } else {
-                        printf("[OpenVPNAdapter] ⚠️ CA certificate markers not found in final config\n");
-                        printf("[OpenVPNAdapter] CA section content (%zu bytes):\n%s\n", finalCaSection.length(), finalCaSection.c_str());
-                        NSLog(@"[OpenVPNAdapter] ⚠️ CA certificate markers not found in CA section");
-                        
-                        // Save error to UserDefaults
-                        @try {
-                            NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                            [logs addObject:@{
-                                @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                @"level": @"ERROR",
-                                @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] ⚠️ CA certificate markers not found in CA section (%zu bytes): %@", finalCaSection.length(), [NSString stringWithUTF8String:finalCaSection.c_str()]]
-                            }];
-                            if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                            [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                            [[NSUserDefaults standardUserDefaults] synchronize];
-                        } @catch (...) {}
-                    }
-                    } // Close else block for finalCaSectionEnd check
-                } else {
-                    printf("[OpenVPNAdapter] ⚠️ CA section not found in final config\n");
-                    printf("[OpenVPNAdapter] configStr length: %zu bytes\n", configStr.length());
-                    printf("[OpenVPNAdapter] Searching for '<ca>' substring...\n");
-                    
-                    // Try case-insensitive search
-                    std::string lowerConfig = configStr;
-                    std::transform(lowerConfig.begin(), lowerConfig.end(), lowerConfig.begin(), ::tolower);
-                    size_t lowerCaPos = lowerConfig.find("<ca>");
-                    printf("[OpenVPNAdapter] Case-insensitive search for '<ca>': found at %zu\n", lowerCaPos);
-                    
-                    // Log a sample of the config to see what's there
-                    size_t sampleStart = configStr.length() > 1000 ? configStr.length() - 1000 : 0;
-                    printf("[OpenVPNAdapter] Last 1000 chars of configStr:\n%s\n", configStr.substr(sampleStart).c_str());
-                    
-                    NSLog(@"[OpenVPNAdapter] ⚠️ CA section not found in final config (length: %zu bytes)", configStr.length());
-                    
-                    // Save error to UserDefaults
-                    @try {
-                        NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
-                        [logs addObject:@{
-                            @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                            @"level": @"ERROR",
-                            @"message": [NSString stringWithFormat:@"[OpenVPNAdapter] ⚠️ CA section not found in final config (length: %zu bytes)", configStr.length()]
-                        }];
-                        if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
-                        [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
-                        [[NSUserDefaults standardUserDefaults] synchronize];
-                    } @catch (...) {}
+                    NSLog(@"[OpenVPNAdapter] CA section present in config");
                 }
-                printf("========================================\n");
+                (void)finalCaPos;
+                (void)finalCaEndPos;
                 
-                // Connect (this blocks until disconnect)
+                // Connect (this blocks until disconnect) - no cert/config logged (security)
                 NSLog(@"[OpenVPNAdapter] 🔌 Connecting to server...");
-                printf("[OpenVPNAdapter] 🔌 About to call client_->connect()...\n");
-                printf("[OpenVPNAdapter] This is where mbedTLS will parse CA certificate\n");
                 
                 // Save log to UserDefaults IMMEDIATELY before connect()
                 @try {
@@ -2632,16 +1948,14 @@ private:
                 } @catch (...) {}
                 
                 @try {
-                    NSLog(@"[OpenVPNAdapter] ⚠️ CALLING client_->connect() NOW - mbedTLS will parse CA cert");
-                    printf("[OpenVPNAdapter] ⚠️ CALLING client_->connect() NOW\n");
-                    
+                    NSLog(@"[OpenVPNAdapter] Calling client_->connect()...");
                     // Save log BEFORE calling connect()
                     @try {
                         NSMutableArray *logs = [[[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.Logs"] mutableCopy] ?: [NSMutableArray array];
                         [logs addObject:@{
                             @"timestamp": @([[NSDate date] timeIntervalSince1970]),
                             @"level": @"INFO",
-                            @"message": @"[OpenVPNAdapter] ⚠️ CALLING client_->connect() NOW - mbedTLS will parse CA cert"
+                            @"message": @"[OpenVPNAdapter] Calling client_->connect()..."
                         }];
                         if (logs.count > 100) { [logs removeObjectsInRange:NSMakeRange(0, logs.count - 100)]; }
                         [[NSUserDefaults standardUserDefaults] setObject:logs forKey:@"DataGateVPNExtension.Logs"];
