@@ -33,6 +33,19 @@
 #include <psa/crypto.h>
 #endif
 #import <string>
+#include <vector>
+#include <mutex>
+
+// Debug: parse IPv4 header and return "src -> dst proto=N" (nil if not IPv4 or too short)
+static NSString* _tunnelDebugIPv4Summary(NSData *data) {
+    if (!data || data.length < 20) return nil;
+    const uint8_t *p = (const uint8_t *)data.bytes;
+    if ((p[0] >> 4) != 4) return nil;
+    char src[32], dst[32];
+    snprintf(src, sizeof(src), "%u.%u.%u.%u", p[12], p[13], p[14], p[15]);
+    snprintf(dst, sizeof(dst), "%u.%u.%u.%u", p[16], p[17], p[18], p[19]);
+    return [NSString stringWithFormat:@"%s -> %s proto=%u", src, dst, (unsigned int)p[9]];
+}
 
 // C bridge function to save logs from C++ to UserDefaults
 // This allows C++ code (like load_ca, parse) to save logs that will be visible in the app
@@ -428,28 +441,26 @@ public:
         printf("[IOSOpenVPNClient] ✅ socketpair created: [%d, %d]\n", sockets[0], sockets[1]);
         saveLogToUserDefaults("INFO", [NSString stringWithFormat:@"[IOSOpenVPNClient] ✅ socketpair created: [%d, %d]", sockets[0], sockets[1]].UTF8String);
         
-        // Create CFSocket wrappers
-        // Note: For C++ classes, we use regular void* cast, not __bridge
+        // Create CFSocket for OUR end of the pair (sockets[0]).
+        // Socket pair semantics: write to [0] -> readable on [1]; write to [1] -> readable on [0].
+        // We must READ from [0] (to get what OpenVPN3 writes to [1]) and WRITE to [0] (so OpenVPN3 reads from [1]).
+        // Previously we wrote to [1], so our writes appeared on [0] and we read our own data (ECHO). Fixed by using [0] for both.
         CFSocketContext socketCtxt = {0, static_cast<void *>(this), NULL, NULL, NULL};
         
-        // Socket for packetFlow side (receives data from NEPacketTunnelFlow)
         packetFlowSocket_ = CFSocketCreateWithNative(kCFAllocatorDefault, sockets[0], 
                                                       kCFSocketDataCallBack,
                                                       PacketFlowSocketCallback, 
                                                       &socketCtxt);
         
-        // Socket for OpenVPN3 side (passed to OpenVPN3)
-        openVPNSocket_ = CFSocketCreateWithNative(kCFAllocatorDefault, sockets[1], 
-                                                   kCFSocketNoCallBack, NULL, NULL);
-        
-        if (!packetFlowSocket_ || !openVPNSocket_) {
-            NSLog(@"[IOSOpenVPNClient] ❌ Failed to create CFSocket wrappers");
-            if (packetFlowSocket_) { CFRelease(packetFlowSocket_); packetFlowSocket_ = nullptr; }
-            if (openVPNSocket_) { CFRelease(openVPNSocket_); openVPNSocket_ = nullptr; }
+        if (!packetFlowSocket_) {
+            NSLog(@"[IOSOpenVPNClient] ❌ Failed to create CFSocket wrapper");
             close(sockets[0]);
             close(sockets[1]);
             return false;
         }
+        // Use same socket for sending: we send to [0], so data arrives on [1] for OpenVPN3 to read.
+        openVPNSocket_ = packetFlowSocket_;
+        CFRetain(openVPNSocket_);
         
         // Configure socket options
         int buf_value = 65536;
@@ -550,10 +561,10 @@ public:
         printf("%s\n", [socketInfo UTF8String]);
         saveLogToUserDefaults("INFO", [socketInfo UTF8String]);
         
-        // Store native FD for OpenVPN3 (sockets[1])
+        // Store native FD for OpenVPN3 (sockets[1]). We use [0] for read+write; OpenVPN3 uses [1]. No more echo.
         openVPNSocketFD_ = sockets[1];
         
-        NSString *successMsg = [NSString stringWithFormat:@"[IOSOpenVPNClient] ✅ Socket pair configured: packetFlow=%d, openVPN=%d", sockets[0], sockets[1]];
+        NSString *successMsg = [NSString stringWithFormat:@"[IOSOpenVPNClient] ✅ Socket pair configured: we use fd %d (read+write), OpenVPN3 uses fd %d", sockets[0], sockets[1]];
         NSLog(@"%@", successMsg);
         printf("%s\n", [successMsg UTF8String]);
         saveLogToUserDefaults("INFO", [successMsg UTF8String]);
@@ -566,14 +577,7 @@ public:
         printf("[IOSOpenVPNClient] 🔄 invalidateSockets() called\n");
         saveLogToUserDefaults("INFO", "[IOSOpenVPNClient] 🔄 invalidateSockets() called");
         
-        if (openVPNSocket_) {
-            CFSocketInvalidate(openVPNSocket_);
-            CFRelease(openVPNSocket_);
-            openVPNSocket_ = nullptr;
-            NSLog(@"[IOSOpenVPNClient] ✅ Invalidated openVPNSocket_");
-            saveLogToUserDefaults("INFO", "[IOSOpenVPNClient] ✅ Invalidated openVPNSocket_");
-        }
-        
+        // openVPNSocket_ may be the same as packetFlowSocket_ (we use [0] for both read and write), so only release once.
         if (packetFlowSocket_) {
             CFSocketInvalidate(packetFlowSocket_);
             CFRelease(packetFlowSocket_);
@@ -581,6 +585,7 @@ public:
             NSLog(@"[IOSOpenVPNClient] ✅ Invalidated packetFlowSocket_");
             saveLogToUserDefaults("INFO", "[IOSOpenVPNClient] ✅ Invalidated packetFlowSocket_");
         }
+        openVPNSocket_ = nullptr;  // same as packetFlowSocket_ if shared, do not double-release
         
         if (openVPNSocketFD_ != -1) {
             close(openVPNSocketFD_);
@@ -697,7 +702,14 @@ public:
                     NSLog(@"%@", packetInfo);
                     printf("%s\n", [packetInfo UTF8String]);
                     saveLogToUserDefaults("INFO", [packetInfo UTF8String]);
-                    
+                    // TUNNEL DEBUG: first 5 packets FROM device — видно, шлёт ли iOS трафик в туннель и куда
+                    if (i < 5 && packetData.length >= 20) {
+                        NSString *sum = _tunnelDebugIPv4Summary(packetData);
+                        if (sum.length) {
+                            NSString *msg = [NSString stringWithFormat:@"[TUNNEL DEBUG] FROM_DEVICE pkt%lu: %@", (unsigned long)i, sum];
+                            saveLogToUserDefaults("INFO", [msg UTF8String]);
+                        }
+                    }
                     if (packetData.length == 0) {
                         NSLog(@"[IOSOpenVPNClient] ⚠️ Skipping empty packet[%lu]", (unsigned long)i);
                         continue;
@@ -733,6 +745,12 @@ public:
                         printf("%s\n", [successMsg UTF8String]);
                         fflush(stdout); // Force flush
                         saveLogToUserDefaults("INFO", [successMsg UTF8String]);
+                        // Diagnostic: remember last sent packet (raw IP, no prefix) to detect echo in callback
+                        {
+                            std::lock_guard<std::mutex> lock(strongSelf->lastSentPacketMutex_);
+                            const uint8_t *ptr = (const uint8_t *)packetData.bytes;
+                            strongSelf->lastSentPacket_.assign(ptr, ptr + packetData.length);
+                        }
                         // CRITICAL: Force sync after each packet to ensure logs are saved before possible crash
                         [[NSUserDefaults standardUserDefaults] synchronize];
                     }
@@ -1025,6 +1043,25 @@ public:
         saveLogToUserDefaults("INFO", [logMsg UTF8String]);
         [[NSUserDefaults standardUserDefaults] synchronize];
         
+        // Diagnostic: log first bytes of payload for first 3 received packets (to confirm what OpenVPN3 writes)
+        static int s_receivedFromVPNCount = 0;
+        if (s_receivedFromVPNCount < 3 && vpnData.length >= 4) {
+            s_receivedFromVPNCount++;
+            NSData *payload = [vpnData subdataWithRange:NSMakeRange(4, MIN(32u, (unsigned)(vpnData.length - 4)))];
+            NSMutableString *hex = [NSMutableString stringWithCapacity:payload.length * 3];
+            const uint8_t *p = (const uint8_t *)payload.bytes;
+            for (NSUInteger i = 0; i < payload.length; i++) {
+                if (i) [hex appendString:@" "];
+                [hex appendFormat:@"%02x", p[i]];
+            }
+            if (payload.length >= 20) {
+                NSString *dir = [NSString stringWithFormat:@"%u.%u.%u.%u -> %u.%u.%u.%u", p[12], p[13], p[14], p[15], p[16], p[17], p[18], p[19]];
+                saveLogToUserDefaults("INFO", [NSString stringWithFormat:@"[TUNNEL DEBUG] FROM_OPENVPN3 #%d: %lu bytes, first 32b hex: %@, src->dst: %@", s_receivedFromVPNCount, (unsigned long)(vpnData.length - 4), hex, dir].UTF8String);
+            } else {
+                saveLogToUserDefaults("INFO", [NSString stringWithFormat:@"[TUNNEL DEBUG] FROM_OPENVPN3 #%d: %lu bytes, hex: %@", s_receivedFromVPNCount, (unsigned long)(vpnData.length - 4), hex].UTF8String);
+            }
+        }
+        
         // CRITICAL: Extract data IMMEDIATELY - we have a copy now, so it's safe
         uint32_t protocol = 0;
         @try {
@@ -1075,6 +1112,15 @@ public:
             saveLogToUserDefaults("WARNING", [errorMsg UTF8String]);
             [[NSUserDefaults standardUserDefaults] synchronize];
             return;
+        }
+        
+        // Diagnostic: check if received packet is identical to last sent (echo = wrong fd or OpenVPN3 bug)
+        {
+            std::lock_guard<std::mutex> lock(client->lastSentPacketMutex_);
+            if (!client->lastSentPacket_.empty() && client->lastSentPacket_.size() == packetData.length &&
+                memcmp(client->lastSentPacket_.data(), packetData.bytes, packetData.length) == 0) {
+                saveLogToUserDefaults("WARNING", "[TUNNEL DEBUG] ECHO DETECTED: received packet is IDENTICAL to last sent (request echoed back - check fd assignment or OpenVPN3 tun write)");
+            }
         }
         
         // Convert protocol to AF_INET/AF_INET6 format for iOS
@@ -1133,7 +1179,16 @@ public:
                         
                         // Write packet asynchronously - this prevents blocking the CFSocket callback
                         [client->adapter_.packetFlow writePackets:@[packetData] withProtocols:@[protocolFamily]];
-                        
+                        // TUNNEL DEBUG: first 5 packets TO device — что мы отдаём обратно в стек
+                        static int s_tunnelDebugWriteCount = 0;
+                        s_tunnelDebugWriteCount++;
+                        if (s_tunnelDebugWriteCount <= 5 && packetData.length >= 20) {
+                            NSString *sum = _tunnelDebugIPv4Summary(packetData);
+                            if (sum.length) {
+                                NSString *msg = [NSString stringWithFormat:@"[TUNNEL DEBUG] TO_DEVICE #%d: %@", s_tunnelDebugWriteCount, sum];
+                                saveLogToUserDefaults("INFO", [msg UTF8String]);
+                            }
+                        }
                         NSString *writeLogMsg = [NSString stringWithFormat:@"[IOSOpenVPNClient] ✅ Wrote packet to packetFlow: %lu bytes, protocol=%u", (unsigned long)packetData.length, capturedProtocol];
                         NSLog(@"%@", writeLogMsg);
                         printf("%s\n", [writeLogMsg UTF8String]);
@@ -1511,6 +1566,9 @@ private:
     CFSocketRef packetFlowSocket_ = nullptr;  // Socket connected to NEPacketTunnelFlow
     CFSocketRef openVPNSocket_ = nullptr;      // Socket passed to OpenVPN3
     int openVPNSocketFD_ = -1;                 // Native FD for OpenVPN3 (returned by tun_builder_establish)
+    // Diagnostic: last packet we sent to OpenVPN3 (to detect echo / wrong fd)
+    std::mutex lastSentPacketMutex_;
+    std::vector<uint8_t> lastSentPacket_;
 };
 
 @interface OpenVPNAdapter () {
@@ -3177,45 +3235,49 @@ private:
     NSLog(@"[OpenVPNAdapter]    MTU: %d", mtu);
     NSLog(@"[OpenVPNAdapter]    DNS servers: %zu", dns.servers.size());
     
-    // Build NEPacketTunnelNetworkSettings
-    NSString *remoteAddress = remoteAddr.empty() ? @"10.8.0.1" : [NSString stringWithUTF8String:remoteAddr.c_str()];
+    // Build NEPacketTunnelNetworkSettings — use virtual gateway (e.g. 10.8.0.1), not physical server IP
+    NSString *remoteAddress = !ipv4Gw.empty() ? [NSString stringWithUTF8String:ipv4Gw.c_str()] : @"10.8.0.1";
     NEPacketTunnelNetworkSettings *settings = [[NEPacketTunnelNetworkSettings alloc] 
         initWithTunnelRemoteAddress:remoteAddress];
     
-    // Configure IPv4
+    // Configure IPv4 - always set so we never overwrite tunnel with no-IPv4 (which would break routing)
+    NSString *address;
+    int prefixLen;
     if (!ipv4Addr.empty()) {
-        NSString *address = [NSString stringWithUTF8String:ipv4Addr.c_str()];
-        int prefixLen = ipv4Prefix > 0 ? ipv4Prefix : 24;
-        NSString *subnetMask = [self subnetMaskFromPrefix:prefixLen];
-        
-        NEIPv4Settings *ipv4Settings = [[NEIPv4Settings alloc] 
-            initWithAddresses:@[address] 
-            subnetMasks:@[subnetMask]];
-        
-        // Add routes
-        NSMutableArray<NEIPv4Route *> *routes = [NSMutableArray array];
-        
-        if (client_->getRerouteIPv4()) {
-            NSLog(@"[OpenVPNAdapter]    Adding default IPv4 route");
-            [routes addObject:[NEIPv4Route defaultRoute]];
-        }
-        
-        // Add specific routes
-        const auto& routeList = client_->getRoutes();
-        for (const auto& route : routeList) {
-            if (!route.ipv6 && !route.exclude) {
-                NSString *routeAddr = [NSString stringWithUTF8String:route.address.c_str()];
-                NSString *routeMask = [self subnetMaskFromPrefix:route.prefix_length];
-                NEIPv4Route *ipv4Route = [[NEIPv4Route alloc] initWithDestinationAddress:routeAddr 
-                                                                              subnetMask:routeMask];
-                [routes addObject:ipv4Route];
-                NSLog(@"[OpenVPNAdapter]    Added route: %@/%@", routeAddr, routeMask);
-            }
-        }
-        
-        ipv4Settings.includedRoutes = routes;
-        settings.IPv4Settings = ipv4Settings;
+        address = [NSString stringWithUTF8String:ipv4Addr.c_str()];
+        prefixLen = ipv4Prefix > 0 ? ipv4Prefix : 24;
+    } else {
+        // Fallback: OpenVPN may not have pushed address yet (e.g. DNS pushed first); keep tunnel usable
+        address = @"10.8.0.2";
+        prefixLen = 24;
+        NSLog(@"[OpenVPNAdapter]    Using fallback IPv4 %@ (server has not pushed address yet)", address);
     }
+    NSString *subnetMask = [self subnetMaskFromPrefix:prefixLen];
+    NEIPv4Settings *ipv4Settings = [[NEIPv4Settings alloc] 
+        initWithAddresses:@[address] 
+        subnetMasks:@[subnetMask]];
+    
+    // Always add default route so traffic goes through VPN (full-tunnel). Without this, no internet.
+    NSMutableArray<NEIPv4Route *> *routes = [NSMutableArray array];
+    [routes addObject:[NEIPv4Route defaultRoute]];
+    NSLog(@"[OpenVPNAdapter]    Adding default IPv4 route (full-tunnel)");
+    
+    // Add server-pushed routes (skip default route — we already added it; duplicate can cause SIGABRT)
+    const auto& routeList = client_->getRoutes();
+    for (const auto& route : routeList) {
+        if (route.ipv6 || route.exclude) continue;
+        NSString *routeAddr = [NSString stringWithUTF8String:route.address.c_str()];
+        if (route.prefix_length <= 0 && [routeAddr isEqualToString:@"0.0.0.0"])
+            continue; // default route already added
+        NSString *routeMask = [self subnetMaskFromPrefix:route.prefix_length];
+        NEIPv4Route *ipv4Route = [[NEIPv4Route alloc] initWithDestinationAddress:routeAddr 
+                                                                      subnetMask:routeMask];
+        [routes addObject:ipv4Route];
+        NSLog(@"[OpenVPNAdapter]    Added route: %@/%@", routeAddr, routeMask);
+    }
+    
+    ipv4Settings.includedRoutes = routes;
+    settings.IPv4Settings = ipv4Settings;
     
     // Configure DNS
     if (dns.servers.size() > 0) {
@@ -3230,6 +3292,7 @@ private:
         
         if (dnsServers.count > 0) {
             NEDNSSettings *dnsSettings = [[NEDNSSettings alloc] initWithServers:dnsServers];
+            dnsSettings.matchDomains = @[@"."];  // "." = all domains (same as working OpenVPN clients)
             
             // Add search domains
             NSMutableArray<NSString *> *searchDomains = [NSMutableArray array];
@@ -3246,6 +3309,7 @@ private:
     } else {
         // Fallback DNS
         NEDNSSettings *dnsSettings = [[NEDNSSettings alloc] initWithServers:@[@"8.8.8.8", @"8.8.4.4"]];
+        dnsSettings.matchDomains = @[@"."];  // "." = all domains
         settings.DNSSettings = dnsSettings;
     }
     

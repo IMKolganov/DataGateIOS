@@ -224,7 +224,7 @@ final class OpenVpnService {
     }
     
     /// Get logs from Extension
-    func getExtensionLogs(since lastTimestamp: TimeInterval = 0) async -> ([String]?, TimeInterval) {
+    func getExtensionLogs(since lastTimestamp: TimeInterval = 0) async -> ([String]?, TimeInterval, [String: String]?) {
         await vpnManager.getExtensionLogs(since: lastTimestamp)
     }
     

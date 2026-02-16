@@ -261,6 +261,9 @@ final class VPNManager {
                                 if let hasAdapter = responseDict["hasAdapter"] as? Bool {
                                     print("   Extension hasAdapter: \(hasAdapter)")
                                 }
+                                if let lastSettings = responseDict["lastAppliedSettings"] as? [String: String] {
+                                    print("   📡 Last applied tunnel: gateway=\(lastSettings["tunnelRemote"] ?? "?"), IP=\(lastSettings["IPv4"] ?? "?"), DNS=\(lastSettings["dns"] ?? "?"), matchDomains=\(lastSettings["matchDomains"] ?? "?")")
+                                }
                                 
                                 // Check for errors from Extension
                                 if let lastError = responseDict["lastError"] as? [String: Any],
@@ -356,6 +359,7 @@ final class VPNManager {
                 
                 if status == .connected {
                     print("✅ [VPNManager] Connected successfully!")
+                    extensionError = nil  // Ignore any stale error from UserDefaults (e.g. previous run's SIGABRT)
                     break
                 } else if status == .connecting {
                     print("⏳ [VPNManager] Still connecting...")
@@ -478,12 +482,12 @@ final class VPNManager {
     }
     
     /// Get logs from Extension (optionally only new logs after lastTimestamp)
-    /// Returns: (logs, maxTimestamp) tuple
-    func getExtensionLogs(since lastTimestamp: TimeInterval = 0) async -> ([String]?, TimeInterval) {
+    /// Returns: (logs, maxTimestamp, lastAppliedSettings) — lastAppliedSettings is set after tunnel connects (gateway, IP, DNS).
+    func getExtensionLogs(since lastTimestamp: TimeInterval = 0) async -> ([String]?, TimeInterval, [String: String]?) {
         guard let manager = await loadVPNManager(),
               let session = manager.connection as? NETunnelProviderSession else {
             print("⚠️ [VPNManager] Cannot get logs - not a tunnel session")
-            return (nil, lastTimestamp)
+            return (nil, lastTimestamp, nil)
         }
         
         return await withCheckedContinuation { continuation in
@@ -493,10 +497,11 @@ final class VPNManager {
                     guard let data = responseData,
                           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                         print("⚠️ [VPNManager] Extension returned invalid logs response")
-                        continuation.resume(returning: (nil, lastTimestamp))
+                        continuation.resume(returning: (nil, lastTimestamp, nil))
                         return
                     }
                     
+                    let lastAppliedSettings = json["lastAppliedSettings"] as? [String: String]
                     var logs: [String] = []
                     var newLogs: [String] = [] // Only new logs
                     var maxTimestamp: TimeInterval = lastTimestamp
@@ -595,11 +600,11 @@ final class VPNManager {
                     
                     // Return only new logs if lastTimestamp was provided, otherwise return all
                     let resultLogs = lastTimestamp > 0 ? newLogs : logs
-                    continuation.resume(returning: (resultLogs.isEmpty ? nil : resultLogs, maxTimestamp))
+                    continuation.resume(returning: (resultLogs.isEmpty ? nil : resultLogs, maxTimestamp, lastAppliedSettings))
                 }
             } catch {
                 print("❌ [VPNManager] Error getting Extension logs: \(error.localizedDescription)")
-                continuation.resume(returning: (nil, lastTimestamp))
+                continuation.resume(returning: (nil, lastTimestamp, nil))
             }
         }
     }

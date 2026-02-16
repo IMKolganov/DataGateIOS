@@ -79,6 +79,21 @@ struct HomeView: View {
                 
                 Spacer()
                 
+                // Last applied tunnel settings (after connect, when extension reports them)
+                if let tunnelInfo = vpnViewModel.lastAppliedTunnelSettings {
+                    Text(tunnelInfo)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(.systemGray6))
+                        .cornerRadius(6)
+                        .padding(.horizontal, 20)
+                        .padding(.bottom, 8)
+                }
+                
                 // Extension Logs Section - Always show if there are logs or errors
                 if !vpnViewModel.extensionLogs.isEmpty || vpnViewModel.connectionError != nil {
                     VStack(spacing: 8) {

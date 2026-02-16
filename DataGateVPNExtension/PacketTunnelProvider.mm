@@ -844,6 +844,11 @@ static void extension_loaded() {
                         @"description": self.lastError.localizedDescription ?: @"Unknown error"
                     };
                 }
+                // Include last applied network settings (for debugging: gateway, IP, DNS, matchDomains)
+                NSDictionary *lastSettings = [[NSUserDefaults standardUserDefaults] objectForKey:@"DataGateVPNExtension.LastAppliedSettings"];
+                if (lastSettings) {
+                    response[@"lastAppliedSettings"] = lastSettings;
+                }
                 
                 NSData *responseData = [NSJSONSerialization dataWithJSONObject:response 
                                                                        options:0 
@@ -958,66 +963,13 @@ static void extension_loaded() {
 #pragma mark - Private Methods
 
 - (void)configureTunnelSettingsWithCompletion:(void (^)(NSError *))completionHandler {
-    printf("========================================\n");
-    printf("[PacketTunnel] ====== configureTunnelSettingsWithCompletion CALLED ======\n");
-    printf("[PacketTunnel] Thread: %s\n", [[NSThread currentThread].description UTF8String]);
-    printf("========================================\n");
-    
-    NSLog(@"🔧 [PacketTunnel] configureTunnelSettingsWithCompletion called");
-    [self addLogEntry:@"configureTunnelSettingsWithCompletion called" level:@"INFO"];
+    // Do NOT apply temporary settings here. Apply network settings only ONCE when OpenVPN3
+    // pushes the real config in needsNetworkSettings. This matches working clients (e.g. OpenVPN Connect)
+    // and avoids iOS routing issues from applying 10.8.0.x then updating to server-pushed 10.50.29.x.
+    NSLog(@"🔧 [PacketTunnel] Skipping initial setTunnelNetworkSettings (will apply once from OpenVPN3)");
+    [self addLogEntry:@"Skipping initial tunnel settings (will apply from OpenVPN3)" level:@"INFO"];
     [self saveLogsToUserDefaults];
-    
-    @try {
-        // Configure basic tunnel network settings
-        // These will be updated when OpenVPN3 provides actual settings via delegate
-        
-        NSLog(@"🔧 [PacketTunnel] Creating NEPacketTunnelNetworkSettings...");
-        NEPacketTunnelNetworkSettings *settings = [[NEPacketTunnelNetworkSettings alloc] 
-            initWithTunnelRemoteAddress:@"10.8.0.1"];
-        NSLog(@"✅ [PacketTunnel] NEPacketTunnelNetworkSettings created");
-        
-        // Configure IPv4 settings
-        NSLog(@"🔧 [PacketTunnel] Configuring IPv4 settings...");
-        NEIPv4Settings *ipv4Settings = [[NEIPv4Settings alloc] 
-            initWithAddresses:@[@"10.8.0.2"] 
-            subnetMasks:@[@"255.255.255.0"]];
-        
-        // Add default route
-        NEIPv4Route *defaultRoute = [NEIPv4Route defaultRoute];
-        ipv4Settings.includedRoutes = @[defaultRoute];
-        settings.IPv4Settings = ipv4Settings;
-        NSLog(@"✅ [PacketTunnel] IPv4 settings configured");
-        
-        // Configure DNS
-        NSLog(@"🔧 [PacketTunnel] Configuring DNS settings...");
-        NEDNSSettings *dnsSettings = [[NEDNSSettings alloc] 
-            initWithServers:@[@"8.8.8.8", @"8.8.4.4"]];
-        settings.DNSSettings = dnsSettings;
-        NSLog(@"✅ [PacketTunnel] DNS settings configured");
-        
-        // Configure MTU
-        settings.MTU = @(1500);
-        
-        NSLog(@"🔧 [PacketTunnel] Calling setTunnelNetworkSettings...");
-        [self setTunnelNetworkSettings:settings completionHandler:^(NSError *error) {
-            if (error) {
-                NSLog(@"❌ [PacketTunnel] Error setting tunnel network settings: %@", error.localizedDescription);
-                NSLog(@"❌ [PacketTunnel] Error domain: %@, code: %ld", error.domain, (long)error.code);
-                NSLog(@"❌ [PacketTunnel] Error userInfo: %@", error.userInfo);
-            } else {
-                NSLog(@"✅ [PacketTunnel] Tunnel network settings configured successfully");
-                NSLog(@"✅ [PacketTunnel] Settings applied (temporary, will be updated by OpenVPN3)");
-            }
-            completionHandler(error);
-        }];
-    } @catch (NSException *exception) {
-        NSLog(@"❌ [PacketTunnel] EXCEPTION in configureTunnelSettings: %@", exception);
-        NSLog(@"❌ [PacketTunnel] Stack trace: %@", exception.callStackSymbols);
-        NSError *error = [NSError errorWithDomain:@"PacketTunnelProvider" 
-                                             code:5 
-                                         userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Exception: %@", exception.reason]}];
-        completionHandler(error);
-    }
+    completionHandler(nil);
 }
 
 #pragma mark - OpenVPNAdapterDelegate
@@ -1028,15 +980,14 @@ static void extension_loaded() {
         self.isConnected = YES;
         self.lastError = nil; // Clear any previous errors
         
-        // Get connection info and update network settings
-        // For now, we'll keep the basic settings
-        // TODO: Update settings based on OpenVPN3 connection info
+        // Clear saved crash/error so app does not show stale SIGABRT from a previous run
+        [[NSUserDefaults standardUserDefaults] removeObjectForKey:kExtensionErrorKey];
+        [[NSUserDefaults standardUserDefaults] removeObjectForKey:kExtensionCrashKey];
+        [[NSUserDefaults standardUserDefaults] synchronize];
         
-        // Complete the tunnel start
-        if (self.startCompletionHandler) {
-            self.startCompletionHandler(nil);
-            self.startCompletionHandler = nil;
-        }
+        // Re-apply network settings with full tun_builder state so routing/DNS are correct for traffic
+        [adapter updateNetworkSettings];
+        // startCompletionHandler is called in needsNetworkSettings after setTunnelNetworkSettings completes
     } @catch (NSException *exception) {
         NSLog(@"❌ [PacketTunnel] EXCEPTION in openVPNAdapterDidConnect: %@", exception);
         NSError *error = [NSError errorWithDomain:@"PacketTunnelProvider" 
@@ -1095,6 +1046,37 @@ static void extension_loaded() {
     needsNetworkSettings:(NEPacketTunnelNetworkSettings *)settings {
     @try {
         NSLog(@"🔧 [PacketTunnel] Updating network settings from OpenVPN3");
+        NSString *remoteStr = settings.tunnelRemoteAddress ?: @"(nil)";
+        NSString *ipv4Str = @"(none)";
+        if (settings.IPv4Settings.addresses.count > 0) {
+            ipv4Str = [settings.IPv4Settings.addresses componentsJoinedByString:@", "];
+        }
+        NSString *dnsStr = @"(none)";
+        if (settings.DNSSettings.servers.count > 0) {
+            dnsStr = [settings.DNSSettings.servers componentsJoinedByString:@", "];
+        }
+        NSString *matchDomainsStr = settings.DNSSettings.matchDomains.count > 0
+            ? [settings.DNSSettings.matchDomains componentsJoinedByString:@"; "] : @"(nil=all)";
+        [self addLogEntry:[NSString stringWithFormat:@"🔧 Updating network settings from OpenVPN3: tunnelRemote=%@, IPv4=%@, DNS=%@, matchDomains=%@", remoteStr, ipv4Str, dnsStr, matchDomainsStr] level:@"INFO"];
+        // TUNNEL DEBUG: dump routes (должен быть default = 0.0.0.0/0)
+        if (settings.IPv4Settings.includedRoutes.count > 0) {
+            NSMutableArray *routeStrs = [NSMutableArray array];
+            for (NEIPv4Route *r in settings.IPv4Settings.includedRoutes) {
+                [routeStrs addObject:[NSString stringWithFormat:@"%@/%@", r.destinationAddress, r.destinationSubnetMask]];
+            }
+            [self addLogEntry:[NSString stringWithFormat:@"[TUNNEL DEBUG] includedRoutes(%lu): %@", (unsigned long)settings.IPv4Settings.includedRoutes.count, [routeStrs componentsJoinedByString:@", "]] level:@"INFO"];
+        }
+        if (settings.IPv4Settings.excludedRoutes.count > 0) {
+            NSMutableArray *exStrs = [NSMutableArray array];
+            for (NEIPv4Route *r in settings.IPv4Settings.excludedRoutes) {
+                [exStrs addObject:[NSString stringWithFormat:@"%@/%@", r.destinationAddress, r.destinationSubnetMask]];
+            }
+            [self addLogEntry:[NSString stringWithFormat:@"[TUNNEL DEBUG] excludedRoutes(%lu): %@", (unsigned long)settings.IPv4Settings.excludedRoutes.count, [exStrs componentsJoinedByString:@", "]] level:@"WARNING"];
+        }
+        [self saveLogsToUserDefaults];
+        // Save last applied settings so app can verify (key used by VPNManager when requesting status)
+        [[NSUserDefaults standardUserDefaults] setObject:@{ @"tunnelRemote": remoteStr, @"IPv4": ipv4Str, @"dns": dnsStr, @"matchDomains": matchDomainsStr } forKey:@"DataGateVPNExtension.LastAppliedSettings"];
+        [[NSUserDefaults standardUserDefaults] synchronize];
         
         // Use weak reference to avoid retain cycle
         __weak PacketTunnelProvider *weakSelf = self;
@@ -1107,12 +1089,30 @@ static void extension_loaded() {
                 }
                 if (error) {
                     NSLog(@"❌ [PacketTunnel] Error updating network settings: %@", error.localizedDescription);
+                    [strongSelf addLogEntry:[NSString stringWithFormat:@"❌ setTunnelNetworkSettings failed: %@", error.localizedDescription] level:@"ERROR"];
+                    [strongSelf saveLogsToUserDefaults];
                     strongSelf.lastError = error;
+                    if (strongSelf.startCompletionHandler) {
+                        strongSelf.startCompletionHandler(error);
+                        strongSelf.startCompletionHandler = nil;
+                    }
                 } else {
-                    NSLog(@"✅ [PacketTunnel] Network settings updated successfully");
+                    NSLog(@"✅ [PacketTunnel] Network settings updated successfully (tunnel ready for traffic)");
+                    [strongSelf addLogEntry:@"✅ Network settings from OpenVPN3 applied (tunnel ready for traffic)" level:@"INFO"];
+                    [strongSelf saveLogsToUserDefaults];
+                    if (strongSelf.startCompletionHandler) {
+                        strongSelf.startCompletionHandler(nil);
+                        strongSelf.startCompletionHandler = nil;
+                    }
                 }
             } @catch (NSException *exception) {
                 NSLog(@"❌ [PacketTunnel] EXCEPTION in setTunnelNetworkSettings completion: %@", exception);
+                PacketTunnelProvider *selfForCatch = weakSelf;
+                if (selfForCatch.startCompletionHandler) {
+                    NSError *err = [NSError errorWithDomain:@"PacketTunnelProvider" code:13 userInfo:@{ NSLocalizedDescriptionKey: (exception.reason ?: @"Unknown") }];
+                    selfForCatch.startCompletionHandler(err);
+                    selfForCatch.startCompletionHandler = nil;
+                }
             }
         }];
     } @catch (NSException *exception) {

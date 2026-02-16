@@ -18,6 +18,8 @@ final class VPNConnectionViewModel {
     var statistics: VPNStatistics?
     var extensionLogs: [String] = []
     var showLogs = false
+    /// Last tunnel settings applied by extension (gateway, IP, DNS) — set after connect when logs are fetched.
+    var lastAppliedTunnelSettings: String?
     private var lastLogTimestamp: TimeInterval = 0 // Track last loaded log timestamp
     
     /// Start observing VPN status changes
@@ -47,6 +49,7 @@ final class VPNConnectionViewModel {
         isConnecting = true
         connectionError = nil
         extensionLogs = [] // Clear logs on new connection attempt
+        lastAppliedTunnelSettings = nil
         lastLogTimestamp = 0 // Reset timestamp
         
         do {
@@ -112,6 +115,7 @@ final class VPNConnectionViewModel {
         isConnecting = true
         connectionError = nil
         extensionLogs = [] // Clear logs on new connection attempt
+        lastAppliedTunnelSettings = nil
         
         do {
             print("🔄 [VPNViewModel] Calling connectWithTestConfig...")
@@ -127,7 +131,10 @@ final class VPNConnectionViewModel {
             // Always fetch logs after connection attempt (load all for first time)
             await loadAllLogs()
             
-            if status != .connected {
+            if status == .connected {
+                // Проверка доступности интернета через туннель — результат в лог
+                await checkConnectivityAndLog()
+            } else {
                 print("⚠️ [VPNViewModel] Status is not connected: \(status.rawValue)")
                 
                 // Try to get error from Extension
@@ -156,6 +163,34 @@ final class VPNConnectionViewModel {
         
         isConnecting = false
         print("🏁 [VPNViewModel] Connect process finished")
+    }
+    
+    /// Проверка доступности интернета после коннекта (трафик через VPN). Результат — в консоль (Xcode).
+    private func checkConnectivityAndLog() async {
+        print("🌐 [Connectivity] Checking internet after VPN connect...")
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 10
+        config.timeoutIntervalForResource = 12
+        let session = URLSession(configuration: config)
+        let urls = ["https://www.apple.com", "https://cloudflare.com"]
+        for urlString in urls {
+            guard let url = URL(string: urlString) else { continue }
+            let start = CFAbsoluteTimeGetCurrent()
+            var result = "FAIL"
+            do {
+                let (_, response) = try await session.data(from: url)
+                if let http = response as? HTTPURLResponse, (200...399).contains(http.statusCode) {
+                    result = "OK \(http.statusCode)"
+                } else {
+                    result = "unexpected response"
+                }
+            } catch {
+                result = error.localizedDescription
+            }
+            let elapsed = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
+            print("🌐 [Connectivity] \(urlString): \(result) (\(elapsed)ms)")
+        }
+        print("🌐 [Connectivity] Done.")
     }
     
     /// Get error from Extension via app message
@@ -223,8 +258,11 @@ final class VPNConnectionViewModel {
     /// Refresh Extension logs (only new ones)
     func refreshLogs() async {
         print("🔄 [VPNViewModel] Refreshing Extension logs (since timestamp: \(lastLogTimestamp))...")
-        let (newLogs, maxTimestamp) = await openVpnService.getExtensionLogs(since: lastLogTimestamp)
+        let (newLogs, maxTimestamp, lastSettings) = await openVpnService.getExtensionLogs(since: lastLogTimestamp)
         
+        if let settings = lastSettings, !settings.isEmpty {
+            lastAppliedTunnelSettings = "Gateway: \(settings["tunnelRemote"] ?? "?"), IP: \(settings["IPv4"] ?? "?"), DNS: \(settings["dns"] ?? "?")"
+        }
         if let logs = newLogs, !logs.isEmpty {
             // Append only new logs
             extensionLogs.append(contentsOf: logs)
@@ -247,8 +285,13 @@ final class VPNConnectionViewModel {
     /// Load all logs (reset and load everything)
     func loadAllLogs() async {
         lastLogTimestamp = 0 // Reset timestamp to load all
-        let (logs, maxTimestamp) = await openVpnService.getExtensionLogs(since: 0)
+        let (logs, maxTimestamp, lastSettings) = await openVpnService.getExtensionLogs(since: 0)
         
+        if let settings = lastSettings, !settings.isEmpty {
+            lastAppliedTunnelSettings = "Gateway: \(settings["tunnelRemote"] ?? "?"), IP: \(settings["IPv4"] ?? "?"), DNS: \(settings["dns"] ?? "?")"
+        } else {
+            lastAppliedTunnelSettings = nil
+        }
         if let logEntries = logs, !logEntries.isEmpty {
             extensionLogs = Array(logEntries.suffix(100))
             lastLogTimestamp = maxTimestamp
