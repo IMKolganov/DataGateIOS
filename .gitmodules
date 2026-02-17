@@ -1,0 +1,3 @@
+[submodule "native-openvpn3/openvpn3"]
+	path = native-openvpn3/openvpn3
+	url = https://github.com/OpenVPN/openvpn3.git

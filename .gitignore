@@ -5,6 +5,9 @@
 ## Build generated
 build/
 DerivedData/
+*.o
+*.c.o
+build-mbedtls/
 
 ## Various settings
 *.pbxuser
@@ -80,3 +83,68 @@ fastlane/test_output
 # https://github.com/johnno1962/injectionforxcode
 
 iOSInjectionProject/
+
+# Configuration files with secrets
+Config.plist
+DataGateIOS/Config.plist
+
+# OpenVPN test config (load from file; add test-config.ovpn to Xcode target locally)
+test-config.ovpn
+*.ovpn
+
+# mbedTLS prebuilt libraries (build with update_mbedtls.sh)
+DataGateVPNExtension/libs/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Xcode Patch
+*.xcodeproj/*
+!*.xcodeproj/project.pbxproj
+!*.xcodeproj/xcshareddata/
+!*.xcworkspace/contents.xcworkspacedata
+**/xcshareddata/WorkspaceSettings.xcsettings
+
+# Swift Package Manager
+.swiftpm/
+.build/
+
+# App packaging
+*.app
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+# Swift
+*.swiftpm
+*.xcodeproj
+*.xcworkspace
+!*.xcodeproj/project.pbxproj
+!*.xcworkspace/contents.xcworkspacedata
+
+# Temporary files
+*.tmp
+*.temp
+*~
+*.swp
+*.swo
+
+# Archives
+*.zip
+*.tar.gz
+*.rar
+
+# Logs
+*.log
+*.xcactivitylog
+
+# User-specific files
+*.xcuserstate
+*.xcuserdatad
+xcuserdata/

@@ -1,0 +1,34 @@
+# Makefile for building tests on Linux
+
+# Library paths (adjust for your system)
+MBEDTLS_INCLUDE ?= /usr/include
+MBEDTLS_LIB ?= /usr/lib/x86_64-linux-gnu
+
+# Or use libraries from this project:
+# MBEDTLS_INCLUDE = ./DataGateVPNExtension/mbedtls-include
+# MBEDTLS_LIB = ./DataGateVPNExtension/libs
+
+CXX = g++
+CXXFLAGS = -std=c++11 -Wall -Wextra -O2
+LDFLAGS = -lmbedtls -lmbedx509 -lmbedcrypto
+
+# mbedTLS parsing test
+test_mbedtls_parse: test_mbedtls_parse.cpp
+	$(CXX) $(CXXFLAGS) -I$(MBEDTLS_INCLUDE) -o $@ $< -L$(MBEDTLS_LIB) $(LDFLAGS)
+
+# OpenVPN3 parsing test (if library is available)
+test_openvpn3_parse: test_openvpn3_parse.cpp
+	@echo "Note: Requires OpenVPN3 library to be built first"
+	@echo "Update OPENVPN3_INCLUDE and OPENVPN3_LIB paths"
+	# $(CXX) $(CXXFLAGS) -I$(OPENVPN3_INCLUDE) -o $@ $< -L$(OPENVPN3_LIB) -lovpncli $(LDFLAGS)
+
+# Install dependencies on Ubuntu/Debian
+install-deps:
+	sudo apt-get update
+	sudo apt-get install -y build-essential cmake git libmbedtls-dev
+
+# Clean
+clean:
+	rm -f test_mbedtls_parse test_openvpn3_parse *.o
+
+.PHONY: clean install-deps
