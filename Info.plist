@@ -9,10 +9,31 @@
 			<string>Editor</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>com.googleusercontent.apps.YOUR_CLIENT_ID_PREFIX</string>
+				<string>com.googleusercontent.apps.590050741192-7i75fbv4vrj5ke7u191sgh5pm51r7d2s</string>
 			</array>
 		</dict>
 	</array>
+	<key>NSVPNUsageDescription</key>
+	<string>This app uses VPN to securely connect to OpenVPN servers and protect your network traffic.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>This app needs access to your local network to establish VPN connections.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<false/>
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>openvpn.net</key>
+			<dict>
+				<key>NSIncludesSubdomains</key>
+				<true/>
+				<key>NSTemporaryExceptionAllowsInsecureHTTPLoads</key>
+				<false/>
+				<key>NSTemporaryExceptionRequiresForwardSecrecy</key>
+				<true/>
+			</dict>
+		</dict>
+	</dict>
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIColorName</key>

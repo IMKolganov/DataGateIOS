@@ -30,12 +30,11 @@ final class JWTDecoder {
         return json
     }
     
+    /// External ID for CN / API: from JWT claim "externalId" or "sub" (Google subject), same as Android JwtClaims.
     static func getExternalId(from jwt: String) -> String? {
-        guard let payload = decode(jwt: jwt),
-              let externalId = payload["externalId"] as? String,
-              !externalId.isEmpty else {
-            return nil
-        }
-        return externalId
+        guard let payload = decode(jwt: jwt) else { return nil }
+        let a = (payload["externalId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let b = (payload["sub"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return a.flatMap { $0.isEmpty ? nil : $0 } ?? b.flatMap { $0.isEmpty ? nil : $0 }
     }
 }

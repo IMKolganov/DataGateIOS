@@ -10,6 +10,9 @@ struct ApiResponse<T: Decodable>: Decodable {
     }
 }
 
+// Mark as Sendable to allow use in nonisolated contexts (URLSession completion handlers)
+extension ApiResponse: @unchecked Sendable where T: Sendable {}
+
 struct GoogleLoginRequest: Encodable {
     let idToken: String
 }

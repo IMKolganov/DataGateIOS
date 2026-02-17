@@ -87,64 +87,60 @@ final class APIClient {
                 return
             }
 
-            do {
-                // Log raw response for debugging
-                if let jsonString = String(data: data, encoding: .utf8) {
-                    print("📡 API Response: \(jsonString.prefix(500))")
-                }
-                
-                // Read backend response flexibly (camelCase or PascalCase) so we always show server error message
-                let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-                let success = (json?["success"] as? Bool) ?? (json?["Success"] as? Bool) ?? false
-                let message = (json?["message"] as? String) ?? (json?["Message"] as? String)
+            // Don't log response body — it may contain tokens and other sensitive data
+            // Read backend response for success/message and to show server error message
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                completion(.failure(NSError(domain: "APIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid JSON response"])))
+                return
+            }
+            
+            let success = (json["success"] as? Bool) ?? (json["Success"] as? Bool) ?? false
+            let message = (json["message"] as? String) ?? (json["Message"] as? String)
 
-                if !success {
-                    let msg = message ?? "Request failed"
-                    print("❌ API Error: \(msg)")
-                    completion(.failure(NSError(domain: "APIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: msg])))
-                    return
-                }
+            if !success {
+                let msg = message ?? "Request failed"
+                print("❌ API Error: \(msg)")
+                completion(.failure(NSError(domain: "APIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: msg])))
+                return
+            }
 
-                // Configure decoder to handle PascalCase
-                let decoder = JSONDecoder()
-                // Try decoding with PascalCase first (C# backend default)
-                if let dataDict = json?["data"] as? [String: Any] ?? json?["Data"] as? [String: Any] {
-                    print("📦 Data structure keys: \(dataDict.keys.joined(separator: ", "))")
-                }
+            let decoder = JSONDecoder()
 
-                let apiResponse = try decoder.decode(ApiResponse<T>.self, from: data)
-                if let responseData = apiResponse.data {
-                    print("✅ Decoded successfully")
-                    completion(.success(responseData))
-                } else {
-                    print("⚠️ No data in response")
-                    completion(.failure(NSError(domain: "APIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: message ?? "No data in response"])))
-                }
-            } catch {
-                // Log decoding error details
-                print("❌ Decoding error: \(error)")
-                if let decodingError = error as? DecodingError {
-                    switch decodingError {
-                    case .keyNotFound(let key, let context):
-                        print("   Missing key: \(key.stringValue) at \(context.codingPath.map { $0.stringValue }.joined(separator: "."))")
-                    case .typeMismatch(let type, let context):
-                        print("   Type mismatch: expected \(type) at \(context.codingPath.map { $0.stringValue }.joined(separator: "."))")
-                    case .valueNotFound(let type, let context):
-                        print("   Value not found: \(type) at \(context.codingPath.map { $0.stringValue }.joined(separator: "."))")
-                    case .dataCorrupted(let context):
-                        print("   Data corrupted at \(context.codingPath.map { $0.stringValue }.joined(separator: ".")): \(context.debugDescription)")
-                    @unknown default:
-                        print("   Unknown decoding error")
+            // Decode in MainActor context to satisfy Swift 6 concurrency requirements
+            Task { @MainActor in
+                do {
+                    let apiResponse = try decoder.decode(ApiResponse<T>.self, from: data)
+                    if let responseData = apiResponse.data {
+                        print("✅ Decoded successfully")
+                        completion(.success(responseData))
+                    } else {
+                        print("⚠️ No data in response")
+                        completion(.failure(NSError(domain: "APIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: message ?? "No data in response"])))
                     }
-                }
-                
-                // If decode failed, try to at least show backend message from raw JSON
-                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let msg = (json["message"] as? String) ?? (json["Message"] as? String) {
-                    completion(.failure(NSError(domain: "APIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: msg])))
-                } else {
-                    let errorDescription = (error as? DecodingError).map { "Decoding error: \($0.localizedDescription)" } ?? error.localizedDescription
-                    completion(.failure(NSError(domain: "APIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: errorDescription])))
+                } catch {
+                    // Log decoding error details
+                    print("❌ Decoding error: \(error)")
+                    if let decodingError = error as? DecodingError {
+                        switch decodingError {
+                        case .keyNotFound(let key, let context):
+                            print("   Missing key: \(key.stringValue) at \(context.codingPath.map { $0.stringValue }.joined(separator: "."))")
+                        case .typeMismatch(let type, let context):
+                            print("   Type mismatch: expected \(type) at \(context.codingPath.map { $0.stringValue }.joined(separator: "."))")
+                        case .valueNotFound(let type, let context):
+                            print("   Value not found: \(type) at \(context.codingPath.map { $0.stringValue }.joined(separator: "."))")
+                        case .dataCorrupted(let context):
+                            print("   Data corrupted at \(context.codingPath.map { $0.stringValue }.joined(separator: ".")): \(context.debugDescription)")
+                        @unknown default:
+                            print("   Unknown decoding error")
+                        }
+                    }
+                    
+                    // If decode failed, try to at least show backend message from raw JSON
+                    if let msg = message {
+                        completion(.failure(NSError(domain: "APIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: msg])))
+                    } else {
+                        completion(.failure(error))
+                    }
                 }
             }
         }.resume()

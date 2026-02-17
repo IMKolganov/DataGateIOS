@@ -44,12 +44,14 @@ struct OpenVpnServerResponse: Decodable {
 struct OpenVpnServerDto: Decodable {
     let id: Int
     let serverName: String
-    let isOnline: Bool
+    /// Optional so decoding doesn't fail if backend omits; nil treated as false when picking best server.
+    let isOnline: Bool?
     let isDefault: Bool
     let apiUrl: String
     let latitude: Double?
     let longitude: Double?
-    let isEnableWss: Bool
+    /// Optional so decoding doesn't fail if backend omits or uses different key; nil treated as false when picking best server.
+    let isEnableWss: Bool?
     let createDate: String
     let lastUpdate: String
     
@@ -73,6 +75,49 @@ struct OpenVpnServerDto: Decodable {
     var lastUpdateParsed: Date? {
         ISO8601DateFormatter().date(from: lastUpdate)
     }
+}
+
+/// Best server chosen locally from get-all-with-status (min countConnectedClients, online + WSS). Matches Android BestServerResult.
+struct BestServerResult {
+    let serverId: Int
+    let name: String?
+    let apiUrl: String?
+    let countConnectedClients: Int
+    let isDefault: Bool
+    
+    /// Build from a single server-with-status row. Only servers with isEnableWss == true are considered
+    /// (servers without nginx/WSS cannot be used for WebSocket proxy).
+    static func from(_ dto: OpenVpnServerWithStatusDto) -> BestServerResult? {
+        let server = dto.openVpnServerResponses.openVpnServer
+        guard server.isOnline == true, server.isEnableWss == true else { return nil }
+        let name = server.serverName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return BestServerResult(
+            serverId: server.id,
+            name: name.isEmpty ? "Server #\(server.id)" : name,
+            apiUrl: server.apiUrl,
+            countConnectedClients: max(0, dto.countConnectedClients),
+            isDefault: server.isDefault
+        )
+    }
+}
+
+// MARK: - OVPN file (download by CN / add with token)
+
+/// Response data for POST api/open-vpn-files/download-file-by-cn. Sendable for use in URLSession completion (Swift 6).
+struct DownloadFileByCnData: Decodable, Sendable {
+    let content: String  // base64
+    let issuedOvpn: IssuedOvpn?
+}
+
+struct IssuedOvpn: Decodable, Sendable {
+    let fileName: String?
+}
+
+/// Result of ensureAndDownloadDeviceFile (matches Android OvpnDownloadResult).
+struct OvpnDownloadResult {
+    let fileName: String
+    let content: Data
+    let contentType: String?
 }
 
 struct OpenVpnServerStatusLogResponse: Decodable {
