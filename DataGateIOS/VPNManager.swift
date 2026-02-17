@@ -273,14 +273,14 @@ final class VPNManager {
         }
     }
     
-    /// Get logs from Extension (optionally only new logs after lastTimestamp)
+    /// Get logs from Extension (optionally only new logs after lastTimestamp).
     /// Returns: (logs, maxTimestamp, lastAppliedSettings) — lastAppliedSettings is set after tunnel connects (gateway, IP, DNS).
     func getExtensionLogs(since lastTimestamp: TimeInterval = 0) async -> ([String]?, TimeInterval, [String: String]?) {
         guard let manager = await loadVPNManager(),
               let session = manager.connection as? NETunnelProviderSession else {
             return (nil, lastTimestamp, nil)
         }
-        
+
         return await withCheckedContinuation { continuation in
             do {
                 let message = try JSONSerialization.data(withJSONObject: ["command": "getLogs"])
@@ -296,61 +296,44 @@ final class VPNManager {
                     var newLogs: [String] = [] // Only new logs
                     var maxTimestamp: TimeInterval = lastTimestamp
                     
+                    let formatter = DateFormatter()
+                    formatter.dateFormat = "HH:mm:ss.SSS"
+                    func appendLogLine(timestamp: TimeInterval, level: String, message: String) -> String? {
+                        guard Self.shouldShowLogMessage(message) else { return nil }
+                        let date = Date(timeIntervalSince1970: timestamp)
+                        let logString = "[\(formatter.string(from: date))] [\(level)] \(message)"
+                        print("[VPN Ext] \(logString)")
+                        return logString
+                    }
+
                     // Get current logs
                     if let logEntries = json["logs"] as? [[String: Any]] {
                         for entry in logEntries {
                             if let timestamp = entry["timestamp"] as? TimeInterval,
                                let level = entry["level"] as? String,
                                let message = entry["message"] as? String,
-                               Self.shouldShowLogMessage(message) {
-                                let date = Date(timeIntervalSince1970: timestamp)
-                                let formatter = DateFormatter()
-                                formatter.dateFormat = "HH:mm:ss.SSS"
-                                let logString = "[\(formatter.string(from: date))] [\(level)] \(message)"
-                                
+                               let logString = appendLogLine(timestamp: timestamp, level: level, message: message) {
                                 logs.append(logString)
-                                
-                                if timestamp > lastTimestamp {
-                                    newLogs.append(logString)
-                                }
-                                
-                                if timestamp > maxTimestamp {
-                                    maxTimestamp = timestamp
-                                }
+                                if timestamp > lastTimestamp { newLogs.append(logString) }
+                                if timestamp > maxTimestamp { maxTimestamp = timestamp }
                             }
                         }
                     }
-                    
+
                     // Get saved logs (from UserDefaults) - merge with current logs, avoiding duplicates
                     if let savedLogs = json["savedLogs"] as? [[String: Any]] {
-                        // Create set of existing log keys to avoid duplicates
                         var existingKeys = Set<String>()
-                        for log in logs {
-                            existingKeys.insert(log)
-                        }
-                        
+                        for log in logs { existingKeys.insert(log) }
                         for entry in savedLogs {
                             if let timestamp = entry["timestamp"] as? TimeInterval,
                                let level = entry["level"] as? String,
                                let message = entry["message"] as? String,
-                               Self.shouldShowLogMessage(message) {
-                                let date = Date(timeIntervalSince1970: timestamp)
-                                let formatter = DateFormatter()
-                                formatter.dateFormat = "HH:mm:ss.SSS"
-                                let logString = "[\(formatter.string(from: date))] [\(level)] \(message)"
-                                
-                                if !existingKeys.contains(logString) {
-                                    logs.append(logString)
-                                    existingKeys.insert(logString)
-                                    
-                                    if timestamp > lastTimestamp {
-                                        newLogs.append(logString)
-                                    }
-                                }
-                                
-                                if timestamp > maxTimestamp {
-                                    maxTimestamp = timestamp
-                                }
+                               let logString = appendLogLine(timestamp: timestamp, level: level, message: message),
+                               !existingKeys.contains(logString) {
+                                logs.append(logString)
+                                existingKeys.insert(logString)
+                                if timestamp > lastTimestamp { newLogs.append(logString) }
+                                if timestamp > maxTimestamp { maxTimestamp = timestamp }
                             }
                         }
                     }
@@ -382,8 +365,8 @@ final class VPNManager {
         }
     }
     
-    /// Filter out certificate dumps and verbose debug from extension logs
-    private static func shouldShowLogMessage(_ message: String) -> Bool {
+    /// Filter out certificate dumps and verbose debug from extension logs (pure function, safe to call from any context).
+    private nonisolated static func shouldShowLogMessage(_ message: String) -> Bool {
         // Never show log lines that could contain certificate or key data (security)
         if message.contains("-----BEGIN ") || message.contains("-----END ") {
             return false
@@ -411,8 +394,8 @@ final class VPNManager {
         return true
     }
     
-    /// Extract time from log string format: "[HH:mm:ss.SSS] [LEVEL] message"
-    private static func extractTime(from logString: String) -> String? {
+    /// Extract time from log string format: "[HH:mm:ss.SSS] [LEVEL] message" (pure function, safe to call from any context).
+    private nonisolated static func extractTime(from logString: String) -> String? {
         let pattern = #"\[(\d{2}:\d{2}:\d{2}\.\d{3})\]"#
         if let regex = try? NSRegularExpression(pattern: pattern),
            let match = regex.firstMatch(in: logString, range: NSRange(logString.startIndex..., in: logString)),
@@ -422,18 +405,18 @@ final class VPNManager {
         return nil
     }
     
-    /// Get error from Extension
+    /// Get error from Extension.
     func getExtensionError() async -> String? {
         guard let manager = await loadVPNManager(),
               let session = manager.connection as? NETunnelProviderSession else {
             return nil
         }
-        
+
         return await withCheckedContinuation { continuation in
             do {
                 let messageDict: [String: String] = ["command": "getError"]
                 let messageData = try JSONSerialization.data(withJSONObject: messageDict)
-                
+
                 try session.sendProviderMessage(messageData) { responseData in
                     guard let data = responseData,
                           let errorDict = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
@@ -441,7 +424,6 @@ final class VPNManager {
                         continuation.resume(returning: nil)
                         return
                     }
-                    
                     continuation.resume(returning: description)
                 }
             } catch {

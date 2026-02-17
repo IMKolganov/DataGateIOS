@@ -109,6 +109,7 @@ final class VPNConnectionViewModel {
     
     /// Connect using config from server: getBest → ensureAndDownloadDeviceFile (by CN) → connect with WSS.
     func connectWithServerConfig(appState: AppState) async {
+        guard !isConnecting else { return }
         isConnecting = true
         connectionError = nil
         extensionLogs = []
@@ -121,7 +122,10 @@ final class VPNConnectionViewModel {
             connectionError = "Not authorized"
             return
         }
-        let externalId = "\(appState.currentUser?.userId ?? 0)"
+        guard let externalId = appState.externalId, !externalId.isEmpty else {
+            connectionError = "ExternalId is not available (missing in token)"
+            return
+        }
         let installationHash = InstallationIdManager.shared.installationHash()
         let issuedTo = "datagate ios user \(externalId) device \(installationHash)"
         print("[VPN] connectWithServerConfig: externalId=\(externalId), issuedTo=\(issuedTo)")
@@ -151,6 +155,31 @@ final class VPNConnectionViewModel {
                                         await self?.updateConnectionStatus()
                                         await self?.loadAllLogs()
                                         print("[VPN] connectWithDownloadedConfig completed without throw")
+                                        // Keep showing "Connecting..." until tunnel reaches a terminal state or timeout
+                                        let timeoutSeconds = 15
+                                        for i in 0..<timeoutSeconds {
+                                            try? await Task.sleep(nanoseconds: 1_000_000_000)
+                                            await self?.updateConnectionStatus()
+                                            if i % 2 == 1 { await self?.refreshLogs() }
+                                            let status = await OpenVpnService.shared.getConnectionStatus()
+                                            if status == .connected {
+                                                print("[VPN] Tunnel connected")
+                                                break
+                                            }
+                                            if status == .disconnected || status == .invalid {
+                                                print("[VPN] Tunnel did not connect: status=\(status.rawValue)")
+                                                if status == .disconnected {
+                                                    self?.connectionError = "Connection failed or was disconnected"
+                                                }
+                                                break
+                                            }
+                                        }
+                                        // If we exited the loop without connecting, show timeout or extension error
+                                        if await OpenVpnService.shared.getConnectionStatus() != .connected {
+                                            let extError = await self?.getExtensionError()
+                                            self?.connectionError = extError ?? "Connection timed out. Try again or check extension logs."
+                                            if extError != nil { await self?.loadAllLogs() }
+                                        }
                                     } catch {
                                         print("[VPN] connectWithDownloadedConfig error: \(error)")
                                         self?.connectionError = error.localizedDescription

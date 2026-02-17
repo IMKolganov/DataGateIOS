@@ -1794,6 +1794,15 @@ private:
                 NSLog(@"[OpenVPNAdapter] Step 4.4: Setting config parameters...");
                 config.content = cleanedConfig;
                 NSLog(@"[OpenVPNAdapter] ✅ Config set (PEM-cleaned), length = %zu bytes", cleanedConfig.length());
+                // Log first "remote" line so we can confirm OpenVPN will connect to 127.0.0.1 (WSS bridge)
+                {
+                    size_t rem = cleanedConfig.find("remote ");
+                    if (rem != std::string::npos) {
+                        size_t end = cleanedConfig.find('\n', rem);
+                        std::string remoteLine = (end != std::string::npos) ? cleanedConfig.substr(rem, end - rem) : cleanedConfig.substr(rem);
+                        NSLog(@"[OpenVPNAdapter] Config remote line: %s (expect 127.0.0.1 <port> for WSS)", remoteLine.c_str());
+                    }
+                }
                 config.serverOverride = ""; // Use server from config
                 config.connTimeout = 30;
                 config.protoOverride = ""; // Use protocol from config (udp/tcp)

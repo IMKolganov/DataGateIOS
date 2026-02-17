@@ -103,13 +103,13 @@ struct BestServerResult {
 
 // MARK: - OVPN file (download by CN / add with token)
 
-/// Response data for POST api/open-vpn-files/download-file-by-cn
-struct DownloadFileByCnData: Decodable {
+/// Response data for POST api/open-vpn-files/download-file-by-cn. Sendable for use in URLSession completion (Swift 6).
+struct DownloadFileByCnData: Decodable, Sendable {
     let content: String  // base64
     let issuedOvpn: IssuedOvpn?
 }
 
-struct IssuedOvpn: Decodable {
+struct IssuedOvpn: Decodable, Sendable {
     let fileName: String?
 }
 

@@ -220,8 +220,8 @@ static void extension_loaded() {
     NSLog(@"🔧 [PacketTunnel] init() called");
     
     // CRITICAL: Log mbedTLS version for debugging
-    printf("[PacketTunnel] mbedTLS version check: MBEDTLS_VERSION_NUMBER = 0x%08X\n", MBEDTLS_VERSION_NUMBER);
-    NSLog(@"🔧 [PacketTunnel] mbedTLS version: 0x%08X (string: %s)", MBEDTLS_VERSION_NUMBER, MBEDTLS_VERSION_STRING);
+    printf("[PacketTunnel] mbedTLS version check: MBEDTLS_VERSION_NUMBER = 0x%08lX\n", (unsigned long)MBEDTLS_VERSION_NUMBER);
+    NSLog(@"🔧 [PacketTunnel] mbedTLS version: 0x%08lX (string: %s)", (unsigned long)MBEDTLS_VERSION_NUMBER, MBEDTLS_VERSION_STRING);
     
     @try {
         self = [super init];
@@ -233,7 +233,7 @@ static void extension_loaded() {
             // Must be done BEFORE any mbedTLS operations
             // NOTE: Do this AFTER self.logEntries is initialized so we can log it
 #if MBEDTLS_VERSION_NUMBER >= 0x03060000
-            [self addLogEntry:[NSString stringWithFormat:@"mbedTLS version: 0x%08X (%s)", MBEDTLS_VERSION_NUMBER, MBEDTLS_VERSION_STRING] level:@"INFO"];
+            [self addLogEntry:[NSString stringWithFormat:@"mbedTLS version: 0x%08lX (%s)", (unsigned long)MBEDTLS_VERSION_NUMBER, MBEDTLS_VERSION_STRING] level:@"INFO"];
             [self addLogEntry:@"mbedTLS version >= 3.6.0, initializing PSA Crypto..." level:@"INFO"];
             
             static bool psa_initialized = false;
@@ -259,9 +259,14 @@ static void extension_loaded() {
                 NSLog(@"ℹ️ [PacketTunnel] PSA Crypto already initialized");
             }
 #else
-            [self addLogEntry:[NSString stringWithFormat:@"⚠️ mbedTLS version < 3.6.0 (0x%08X), PSA Crypto init not required", MBEDTLS_VERSION_NUMBER] level:@"INFO"];
-            printf("[PacketTunnel] ⚠️ mbedTLS version < 3.6.0 (0x%08X), PSA Crypto init not required\n", MBEDTLS_VERSION_NUMBER);
-            NSLog(@"⚠️ [PacketTunnel] mbedTLS version < 3.6.0 (0x%08X), PSA Crypto init not required", MBEDTLS_VERSION_NUMBER);
+#if defined(MBEDTLS_VERSION_NUMBER)
+            [self addLogEntry:[NSString stringWithFormat:@"⚠️ mbedTLS version < 3.6.0 (0x%08lX), PSA Crypto init not required", (unsigned long)MBEDTLS_VERSION_NUMBER] level:@"INFO"];
+            printf("[PacketTunnel] ⚠️ mbedTLS version < 3.6.0 (0x%08lX), PSA Crypto init not required\n", (unsigned long)MBEDTLS_VERSION_NUMBER);
+            NSLog(@"⚠️ [PacketTunnel] mbedTLS version < 3.6.0 (0x%08lX), PSA Crypto init not required", (unsigned long)MBEDTLS_VERSION_NUMBER);
+#else
+            [self addLogEntry:@"⚠️ mbedTLS version unknown (PSA Crypto init skipped)" level:@"INFO"];
+            NSLog(@"⚠️ [PacketTunnel] mbedTLS version unknown, PSA Crypto init skipped");
+#endif
 #endif
             
             // Save logs immediately so PSA init logs are preserved
@@ -284,10 +289,13 @@ static void extension_loaded() {
 }
 
 - (void)addLogEntry:(NSString *)message level:(NSString *)level {
+    NSString *lvl = level ?: @"INFO";
+    NSLog(@"[PacketTunnel] [%@] %@", lvl, message ?: @"");
+    printf("[PacketTunnel] [%s] %s\n", [lvl UTF8String], [(message ?: @"") UTF8String]);
     @synchronized(self.logEntries) {
         NSDictionary *entry = @{
             @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-            @"level": level ?: @"INFO",
+            @"level": lvl,
             @"message": message ?: @""
         };
         [self.logEntries addObject:entry];
@@ -298,7 +306,7 @@ static void extension_loaded() {
         }
         
         // Save to UserDefaults immediately for critical logs, periodically for others
-        if ([level isEqualToString:@"ERROR"] || [level isEqualToString:@"WARNING"] || self.logEntries.count % 5 == 0) {
+        if ([lvl isEqualToString:@"ERROR"] || [lvl isEqualToString:@"WARNING"] || self.logEntries.count % 5 == 0) {
             [self saveLogsToUserDefaults];
         }
     }
@@ -348,7 +356,7 @@ static void extension_loaded() {
 
 #pragma mark - WSS Bridge (TCP 127.0.0.1:port <-> WebSocket)
 
-- (void)startWssBridgeWithPort:(int)port wssUrl:(NSString *)wssUrl {
+- (void)startWssBridgeWithPort:(int)port wssUrl:(NSString *)wssUrl onReady:(void (^)(void))onReady {
     self.wssBridgeListenSocket = -1;
     self.wssBridgeQueue = dispatch_queue_create("com.datagate.wssbridge", DISPATCH_QUEUE_SERIAL);
     __unsafe_unretained PacketTunnelProvider *weakSelf = self;
@@ -358,6 +366,7 @@ static void extension_loaded() {
         if (listenFd < 0) {
             NSLog(@"[PacketTunnel] WSS bridge: socket() failed: %d", errno);
             [weakSelf addLogEntry:[NSString stringWithFormat:@"WSS bridge socket() failed: %d", errno] level:@"ERROR"];
+            if (onReady) dispatch_async(dispatch_get_main_queue(), onReady);
             return;
         }
         int reuse = 1;
@@ -373,20 +382,29 @@ static void extension_loaded() {
             NSLog(@"[PacketTunnel] WSS bridge: bind() failed: %d", errno);
             [weakSelf addLogEntry:[NSString stringWithFormat:@"WSS bridge bind() failed: %d", errno] level:@"ERROR"];
             close(listenFd);
+            if (onReady) dispatch_async(dispatch_get_main_queue(), onReady);
             return;
         }
         if (listen(listenFd, 1) < 0) {
             NSLog(@"[PacketTunnel] WSS bridge: listen() failed: %d", errno);
             close(listenFd);
+            if (onReady) dispatch_async(dispatch_get_main_queue(), onReady);
             return;
         }
         weakSelf.wssBridgeListenSocket = listenFd;
         NSLog(@"[PacketTunnel] WSS bridge: TCP server listening on 127.0.0.1:%d", port);
         [weakSelf addLogEntry:[NSString stringWithFormat:@"WSS bridge listening 127.0.0.1:%d", port] level:@"INFO"];
+        if (onReady) {
+            dispatch_async(dispatch_get_main_queue(), onReady);
+        }
         
+        NSLog(@"[PacketTunnel] WSS bridge: waiting for OpenVPN TCP connection on 127.0.0.1:%d...", port);
+        [weakSelf addLogEntry:[NSString stringWithFormat:@"WSS bridge: waiting for OpenVPN on 127.0.0.1:%d", port] level:@"INFO"];
         int clientFd = accept(listenFd, NULL, NULL);
         if (clientFd < 0) {
             NSLog(@"[PacketTunnel] WSS bridge: accept() failed: %d", errno);
+            [weakSelf addLogEntry:[NSString stringWithFormat:@"WSS bridge: accept() failed errno=%d", errno] level:@"ERROR"];
+            [weakSelf saveLogsToUserDefaults];
             return;
         }
         NSLog(@"[PacketTunnel] WSS bridge: OpenVPN connected, bridging to WSS");
@@ -401,15 +419,23 @@ static void extension_loaded() {
     NSURL *url = [NSURL URLWithString:wssUrl];
     if (!url || !url.scheme) {
         NSLog(@"[PacketTunnel] WSS bridge: invalid URL %@", wssUrl);
+        [self addLogEntry:[NSString stringWithFormat:@"WSS bridge: invalid URL %@", wssUrl] level:@"ERROR"];
         close(clientFd);
         return;
     }
+    [self addLogEntry:[NSString stringWithFormat:@"WSS bridge: connecting WebSocket to %@", wssUrl] level:@"INFO"];
+    NSLog(@"[PacketTunnel] WSS bridge: connecting to %@", wssUrl);
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+    cfg.timeoutIntervalForRequest = 60.0;
+    cfg.timeoutIntervalForResource = 300.0;
     self.wssSession = [NSURLSession sessionWithConfiguration:cfg];
     self.wssTask = [self.wssSession webSocketTaskWithURL:url];
     [self.wssTask resume];
+    [self saveLogsToUserDefaults];
     
     __unsafe_unretained PacketTunnelProvider *weakSelf = self;
+    __block int firstSendDone = 0;
+    __block int firstRecvDone = 0;
     const size_t bufSize = 16 * 1024;
     char *buf = (char *)malloc(bufSize);
     if (!buf) { close(clientFd); return; }
@@ -418,7 +444,19 @@ static void extension_loaded() {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         while (1) {
             ssize_t n = read(clientFd, buf, bufSize);
-            if (n <= 0) break;
+            if (n <= 0) {
+                if (n == 0) {
+                    NSLog(@"[PacketTunnel] WSS bridge: OpenVPN TCP connection closed (read 0)");
+                    [weakSelf addLogEntry:@"WSS bridge: OpenVPN TCP connection closed" level:@"INFO"];
+                } else {
+                    NSLog(@"[PacketTunnel] WSS bridge: TCP read error: %d", errno);
+                    [weakSelf addLogEntry:[NSString stringWithFormat:@"WSS bridge: TCP read error %d", errno] level:@"ERROR"];
+                }
+                break;
+            }
+            if (firstSendDone == 0) {
+                [weakSelf addLogEntry:[NSString stringWithFormat:@"WSS bridge: first TCP data received (%zu bytes), sending to WebSocket", (size_t)n] level:@"INFO"];
+            }
             NSData *data = [NSData dataWithBytes:buf length:(NSUInteger)n];
             NSURLSessionWebSocketMessage *msg = [[NSURLSessionWebSocketMessage alloc] initWithData:data];
             dispatch_semaphore_t sem = dispatch_semaphore_create(0);
@@ -428,27 +466,51 @@ static void extension_loaded() {
                 dispatch_semaphore_signal(sem);
             }];
             dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
-            if (sendErr) break;
+            if (firstSendDone == 0) {
+                firstSendDone = 1;
+                if (sendErr) {
+                    [weakSelf addLogEntry:[NSString stringWithFormat:@"WSS bridge: first WebSocket send failed: %@ (code=%ld)", sendErr.localizedDescription, (long)sendErr.code] level:@"ERROR"];
+                } else {
+                    [weakSelf addLogEntry:@"WSS bridge: WebSocket connected, first send OK" level:@"INFO"];
+                }
+                [weakSelf saveLogsToUserDefaults];
+            }
+            if (sendErr) {
+                [weakSelf addLogEntry:[NSString stringWithFormat:@"WSS bridge: WebSocket send error: %@", sendErr.localizedDescription] level:@"ERROR"];
+                break;
+            }
         }
         close(clientFd);
         free(buf);
     });
     
-    // WSS -> TCP: receive WebSocket messages, write to socket (recursive block to keep receiving)
-    __block void (^receiveNext)(void);
-    receiveNext = ^{
+    // WSS -> TCP: receive WebSocket messages, write to socket (recursive block; nil weakRecv on error to break cycle)
+    __block void (^weakRecv)(void) = nil;
+    void (^receiveNext)(void) = ^{
         [weakSelf.wssTask receiveMessageWithCompletionHandler:^(NSURLSessionWebSocketMessage *message, NSError *error) {
             if (error || !message) {
+                if (error) {
+                    [weakSelf addLogEntry:[NSString stringWithFormat:@"WSS bridge: WebSocket receive error: %@ (code=%ld)", error.localizedDescription, (long)error.code] level:@"ERROR"];
+                    [weakSelf saveErrorToUserDefaults:error];
+                }
+                weakRecv = nil;
                 close(clientFd);
                 return;
+            }
+            if (firstRecvDone == 0) {
+                firstRecvDone = 1;
+                NSUInteger len = message.data ? message.data.length : 0;
+                [weakSelf addLogEntry:[NSString stringWithFormat:@"WSS bridge: first WebSocket message received (%lu bytes)", (unsigned long)len] level:@"INFO"];
+                [weakSelf saveLogsToUserDefaults];
             }
             NSData *data = message.data;
             if (data.length > 0) {
                 write(clientFd, data.bytes, data.length);
             }
-            receiveNext();
+            if (weakRecv) weakRecv();
         }];
     };
+    weakRecv = receiveNext;
     receiveNext();
 }
 
@@ -504,14 +566,6 @@ static void extension_loaded() {
         NSNumber *port = config[@"port"];
         NSString *wssUrl = config[@"wssUrl"];  // Optional: WSS tunnel URL from backend (OpenVPN over WebSocket)
         NSNumber *useWSS = config[@"useWSS"];  // Optional: if YES, extension should use localhost + WSS bridge
-        
-        if (wssUrl.length > 0 && useWSS.boolValue) {
-            // Port must match app (OpenVpnService.wssBridgePort) and Android BRIDGE_PORT = 41194
-            int bridgePort = (port != nil && port.intValue > 0) ? port.intValue : 41194;
-            [self addLogEntry:[NSString stringWithFormat:@"WSS mode: starting TCP server 127.0.0.1:%d → %@", bridgePort, wssUrl] level:@"INFO"];
-            NSLog(@"[PacketTunnel] WSS bridge: TCP server 127.0.0.1:%d, wssUrl=%@", bridgePort, wssUrl);
-            [self startWssBridgeWithPort:bridgePort wssUrl:wssUrl];
-        }
         
         if (!configContent || configContent.length == 0) {
             NSLog(@"❌ [PacketTunnel] ERROR: Config content is empty or nil!");
@@ -600,6 +654,7 @@ static void extension_loaded() {
             }
         }
         
+        void (^startOpenVPN)(void) = ^{
         // Store completion handler FIRST before any async operations
         self.startCompletionHandler = completionHandler;
         
@@ -770,6 +825,16 @@ static void extension_loaded() {
                 }
             }
         }];
+        };
+        
+        if (wssUrl.length > 0 && useWSS.boolValue) {
+            int bridgePort = (port != nil && port.intValue > 0) ? port.intValue : 41194;
+            [self addLogEntry:[NSString stringWithFormat:@"WSS mode: starting TCP server 127.0.0.1:%d → %@ (OpenVPN starts after server is ready)", bridgePort, wssUrl] level:@"INFO"];
+            NSLog(@"[PacketTunnel] WSS bridge: TCP server 127.0.0.1:%d, wssUrl=%@", bridgePort, wssUrl);
+            [self startWssBridgeWithPort:bridgePort wssUrl:wssUrl onReady:startOpenVPN];
+        } else {
+            startOpenVPN();
+        }
     } @catch (NSException *exception) {
         printf("[PacketTunnel] FATAL EXCEPTION in startTunnelWithOptions: %s\n", exception.reason.UTF8String);
         NSLog(@"❌ [PacketTunnel] FATAL EXCEPTION in startTunnelWithOptions: %@", exception);
@@ -1203,8 +1268,8 @@ static void extension_loaded() {
         [[NSUserDefaults standardUserDefaults] setObject:@{ @"tunnelRemote": remoteStr, @"IPv4": ipv4Str, @"dns": dnsStr, @"matchDomains": matchDomainsStr } forKey:@"DataGateVPNExtension.LastAppliedSettings"];
         [[NSUserDefaults standardUserDefaults] synchronize];
         
-        // Use weak reference to avoid retain cycle
-        __weak PacketTunnelProvider *weakSelf = self;
+        // Use weak reference to avoid retain cycle (__unsafe_unretained for MRR compatibility)
+        __unsafe_unretained PacketTunnelProvider *weakSelf = self;
         [self setTunnelNetworkSettings:settings completionHandler:^(NSError *error) {
             @try {
                 PacketTunnelProvider *strongSelf = weakSelf;

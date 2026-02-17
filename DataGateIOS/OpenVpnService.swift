@@ -206,21 +206,24 @@ final class OpenVpnService {
                 return
             }
             print("[VPN] tryDownloadFileByCn: HTTP 200, decoding config")
-            do {
-                let apiResp = try JSONDecoder().decode(ApiResponse<DownloadFileByCnData>.self, from: data)
-                guard let payload = apiResp.data else {
-                    completion(.success(nil))
-                    return
+            let dataToDecode = data
+            let contentType = http.value(forHTTPHeaderField: "Content-Type")
+            Task { @MainActor in
+                do {
+                    let apiResp = try JSONDecoder().decode(ApiResponse<DownloadFileByCnData>.self, from: dataToDecode)
+                    guard let payload = apiResp.data else {
+                        completion(.success(nil))
+                        return
+                    }
+                    guard let decoded = Data(base64Encoded: payload.content) else {
+                        completion(.failure(NSError(domain: "OpenVpnService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid base64 content"])))
+                        return
+                    }
+                    let fileName = payload.issuedOvpn?.fileName ?? "client.ovpn"
+                    completion(.success(OvpnDownloadResult(fileName: fileName, content: decoded, contentType: contentType)))
+                } catch {
+                    completion(.failure(error))
                 }
-                guard let decoded = Data(base64Encoded: payload.content) else {
-                    completion(.failure(NSError(domain: "OpenVpnService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid base64 content"])))
-                    return
-                }
-                let fileName = payload.issuedOvpn?.fileName ?? "client.ovpn"
-                let ct = http.value(forHTTPHeaderField: "Content-Type")
-                completion(.success(OvpnDownloadResult(fileName: fileName, content: decoded, contentType: ct)))
-            } catch {
-                completion(.failure(error))
             }
         }.resume()
     }
@@ -264,12 +267,17 @@ final class OpenVpnService {
                 return
             }
             if http.statusCode == 401, let appState = appState {
-                appState.refreshAccessToken { success in
-                    guard success, let newToken = appState.bearerToken else {
-                        completion(.failure(NSError(domain: "OpenVpnService", code: 401, userInfo: [NSLocalizedDescriptionKey: "Unauthorized"])))
-                        return
+                let service = self
+                Task { @MainActor in
+                    appState.refreshAccessToken { success in
+                        Task { @MainActor in
+                            guard success, let newToken = appState.bearerToken else {
+                                completion(.failure(NSError(domain: "OpenVpnService", code: 401, userInfo: [NSLocalizedDescriptionKey: "Unauthorized"])))
+                                return
+                            }
+                            service?.createFileOnServer(vpnServerId: vpnServerId, commonName: commonName, externalId: externalId, issuedTo: issuedTo, token: newToken, appState: appState, completion: completion)
+                        }
                     }
-                    self?.createFileOnServer(vpnServerId: vpnServerId, commonName: commonName, externalId: externalId, issuedTo: issuedTo, token: newToken, appState: appState, completion: completion)
                 }
                 return
             }
@@ -417,35 +425,32 @@ final class OpenVpnService {
     }
     
     /// Patch .ovpn for WSS: remote → 127.0.0.1:bridgePort, proto → tcp-client (matches Android forceWssConfig).
+    /// Always writes "remote" and "proto tcp-client" at the top of the config (stripping any existing remote/proto from body).
     private func forceWssConfig(original: String) -> String {
         let bridgePort = Self.wssBridgePort
         let lines = original
             .replacingOccurrences(of: "\r\n", with: "\n")
             .components(separatedBy: "\n")
         var out: [String] = []
-        var remoteWritten = false
-        var protoWritten = false
         for raw in lines {
             let line = raw.trimmingCharacters(in: .whitespaces)
             let lower = line.lowercased()
-            if lower.hasPrefix("remote ") {
-                if !remoteWritten {
-                    out.append("remote 127.0.0.1 \(bridgePort)")
-                    remoteWritten = true
-                }
-            } else if lower.hasPrefix("proto ") {
-                out.append("proto tcp-client")
-                protoWritten = true
-            } else {
-                out.append(raw)
+            if lower.hasPrefix("remote ") || lower.hasPrefix("proto ") {
+                continue
             }
+            out.append(raw)
         }
-        if !protoWritten { out.insert("proto tcp-client", at: 0) }
-        if !remoteWritten { out.insert("remote 127.0.0.1 \(bridgePort)", at: 0) }
+        let header = [
+            "remote 127.0.0.1 \(bridgePort)",
+            "proto tcp-client"
+        ]
+        out.insert(contentsOf: header, at: 0)
         return out.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines) + "\n"
     }
     
-    /// Build WSS URL for proxy: https://host → wss://host/api/proxy (matches Android httpsToWssProxy).
+    /// Build WSS URL for proxy: https://host → wss://host/api/proxy?mode=tcp (matches Android httpsToWssProxy).
+    /// Server (OpenVpnProxyController) has two modes: tcp (default) and udp. We use TCP: OpenVPN proto tcp-client
+    /// → local bridge 127.0.0.1:41194 → WebSocket binary stream → server HandleTcp. UDP mode uses different framing.
     private func httpsToWssProxy(_ apiUrl: String) -> String {
         guard let url = URL(string: apiUrl),
               let scheme = url.scheme?.lowercased(),
@@ -458,9 +463,9 @@ final class OpenVpnService {
         comps.host = host
         comps.port = url.port
         comps.path = "/api/proxy"
-        comps.query = nil
+        comps.query = "mode=tcp"
         comps.fragment = nil
-        return comps.string ?? "\(wssScheme)://\(host)/api/proxy"
+        return comps.string ?? "\(wssScheme)://\(host)/api/proxy?mode=tcp"
     }
     
     /// Disconnect from VPN

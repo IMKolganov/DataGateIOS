@@ -156,6 +156,7 @@ struct HomeView: View {
                     }
                 }
                 .buttonStyle(.plain)
+                .disabled(vpnViewModel.isConnecting)
                 .padding(.bottom, 32)
                     
                     // Extension Logs — below button, open only when user taps

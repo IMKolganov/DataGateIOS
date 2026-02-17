@@ -28,13 +28,21 @@ final class InstallationIdManager {
         return newHash
     }
     
+    /// X.509 Common Name max length (RFC 5280). Must match backend/Android if they truncate.
+    private static let maxCnLength = 64
+
     /// Full installation ID: idg-<serverId>-<googleUserId>-<installationHash>
+    /// Truncated to maxCnLength (64) to satisfy X.509 CN limit and match Android.
     /// - Parameters:
     ///   - serverId: Best server id (e.g. from getBest).
     ///   - googleUserId: Google user id string (from backend or backend userId as string).
     func fullInstallationId(serverId: Int, googleUserId: String) -> String {
         let hash = installationHash()
-        return "idg-\(serverId)-\(googleUserId)-\(hash)"
+        let full = "idg-\(serverId)-\(googleUserId)-\(hash)"
+        if full.count <= Self.maxCnLength {
+            return full
+        }
+        return String(full.prefix(Self.maxCnLength))
     }
     
     // MARK: - Private

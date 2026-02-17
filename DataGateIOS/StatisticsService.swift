@@ -77,15 +77,33 @@ final class StatisticsService {
         urlRequest.setValue("application/json", forHTTPHeaderField: "Accept")
         urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         
-        URLSession.shared.dataTask(with: urlRequest) { data, response, error in
+        URLSession.shared.dataTask(with: urlRequest) { [weak self] data, response, error in
             if let error = error {
                 completion(.failure(error))
                 return
             }
             
-            guard let httpResponse = response as? HTTPURLResponse,
-                  (200...299).contains(httpResponse.statusCode) else {
-                let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            guard let httpResponse = response as? HTTPURLResponse else {
+                completion(.failure(NSError(domain: "StatisticsService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid response"])))
+                return
+            }
+            
+            // On 401, refresh token and retry once (same as OpenVpnService)
+            if httpResponse.statusCode == 401, let appState = appState {
+                Task { @MainActor in
+                    appState.refreshAccessToken { success in
+                        guard success, let newToken = appState.bearerToken else {
+                            completion(.failure(NSError(domain: "StatisticsService", code: 401, userInfo: [NSLocalizedDescriptionKey: "Unauthorized"])))
+                            return
+                        }
+                        self?.performRequest(request: request, token: newToken, appState: appState, completion: completion)
+                    }
+                }
+                return
+            }
+            
+            guard (200...299).contains(httpResponse.statusCode) else {
+                let statusCode = httpResponse.statusCode
                 completion(.failure(NSError(domain: "StatisticsService", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP \(statusCode)"])))
                 return
             }
