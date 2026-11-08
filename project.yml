@@ -39,6 +39,8 @@ targets:
     platform: iOS
     dependencies:
       - sdk: NetworkExtension.framework
+      - sdk: UIKit.framework
+      - sdk: Foundation.framework
     sources:
       - path: DataGateVPNExtension
         excludes:
@@ -47,8 +49,11 @@ targets:
           - Info.plist
           - "*.entitlements"
       # OpenVPN 3 core is mostly headers; these TUs provide OpenVPNClient + crypto helpers.
+      # Compile as ObjC++: Apple hwaddr path pulls UIKit/Foundation (@class etc.).
       - path: native-openvpn3/openvpn3/client/ovpncli.cpp
+        compilerFlags: "-x objective-c++"
       - path: native-openvpn3/openvpn3/openvpn/crypto/data_epoch.cpp
+        compilerFlags: "-x objective-c++"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: imkolganov.DataGateIOS.VPNExtension
