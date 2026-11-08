@@ -7,6 +7,7 @@ import SwiftUI
 
 struct ContentView: View {
     @Environment(AppState.self) private var appState
+    @State private var showClientOutdated = false
 
     var body: some View {
         Group {
@@ -30,6 +31,14 @@ struct ContentView: View {
             }
         }
         .ignoresSafeArea(.all)
+        .onReceive(NotificationCenter.default.publisher(for: ClientIdentity.rejectedNotification)) { _ in
+            showClientOutdated = true
+        }
+        .alert("Update required", isPresented: $showClientOutdated) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(ClientIdentity.outdatedMessage)
+        }
     }
 }
 

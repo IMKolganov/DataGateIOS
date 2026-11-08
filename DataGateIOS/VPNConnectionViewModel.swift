@@ -70,43 +70,6 @@ final class VPNConnectionViewModel {
         isConnecting = false
     }
     
-    /// Connect to VPN server - loads .ovpn config from API first
-    func connectWithConfigLoad(
-        server: OpenVpnServerDto,
-        authToken: String,
-        appState: AppState? = nil
-    ) async {
-        isConnecting = true
-        connectionError = nil
-        
-        await withCheckedContinuation { continuation in
-            openVpnService.getOVPNConfig(
-                serverId: server.id,
-                authToken: authToken,
-                appState: appState
-            ) { [weak self] result in
-                Task { @MainActor in
-                    switch result {
-                    case .success(let configContent):
-                        do {
-                            try await self?.openVpnService.connectToServer(
-                                server,
-                                ovpnConfigContent: configContent
-                            )
-                            await self?.updateConnectionStatus()
-                        } catch {
-                            self?.connectionError = error.localizedDescription
-                        }
-                    case .failure(let error):
-                        self?.connectionError = error.localizedDescription
-                    }
-                    self?.isConnecting = false
-                    continuation.resume()
-                }
-            }
-        }
-    }
-    
     /// Connect using config from server: getBest → ensureAndDownloadDeviceFile (by CN) → connect with WSS.
     func connectWithServerConfig(appState: AppState) async {
         guard !isConnecting else { return }

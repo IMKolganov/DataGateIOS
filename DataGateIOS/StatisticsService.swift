@@ -77,7 +77,7 @@ final class StatisticsService {
         urlRequest.setValue("application/json", forHTTPHeaderField: "Accept")
         urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         
-        URLSession.shared.dataTask(with: urlRequest) { [weak self] data, response, error in
+        ClientIdentity.dataTask(with: urlRequest) { [weak self] data, response, error in
             if let error = error {
                 completion(.failure(error))
                 return

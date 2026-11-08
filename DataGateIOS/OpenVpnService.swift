@@ -37,6 +37,9 @@ final class OpenVpnService {
         appState: AppState?,
         completion: @escaping (Result<OpenVpnServerWithStatusesResponse, Error>) -> Void
     ) {
+        // Stays on v1 on purpose: the backend's v1 list hides Xray and UDP OpenVPN servers, and this app can only
+        // run OpenVPN TCP over WSS. Move to /api/v3/open-vpn-servers/get-all-with-status (like Android) once it
+        // supports UDP-over-WSS and Xray, filtering by serverType / isAccessibleForUserQuotaPlan.
         client.request(
             path: "/api/open-vpn-servers/get-all-with-status",
             method: "GET",
@@ -180,7 +183,7 @@ final class OpenVpnService {
             completion(.failure(error))
             return
         }
-        URLSession.shared.dataTask(with: request) { data, response, error in
+        ClientIdentity.dataTask(with: request) { data, response, error in
             if let error = error {
                 completion(.failure(error))
                 return
@@ -257,7 +260,7 @@ final class OpenVpnService {
             completion(.failure(error))
             return
         }
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+        ClientIdentity.dataTask(with: request) { [weak self] data, response, error in
             if let error = error {
                 completion(.failure(error))
                 return
@@ -290,90 +293,6 @@ final class OpenVpnService {
     }
     
     // MARK: - VPN Connection Management
-    
-    /// Get OpenVPN configuration file (.ovpn) from server
-    func getOVPNConfig(
-        serverId: Int,
-        authToken: String,
-        appState: AppState? = nil,
-        completion: @escaping (Result<String, Error>) -> Void
-    ) {
-        // Ensure token is valid before making request
-        if let appState = appState {
-            appState.ensureValidToken { [weak self] isValid in
-                guard isValid, let token = appState.bearerToken else {
-                    completion(.failure(NSError(domain: "OpenVpnService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid or expired token"])))
-                    return
-                }
-                self?.performConfigRequest(serverId: serverId, token: token, appState: appState, completion: completion)
-            }
-        } else {
-            performConfigRequest(serverId: serverId, token: authToken, appState: nil, completion: completion)
-        }
-    }
-    
-    private func performConfigRequest(
-        serverId: Int,
-        token: String,
-        appState: AppState?,
-        completion: @escaping (Result<String, Error>) -> Void
-    ) {
-        // Get .ovpn config file as plain text
-        // TODO: Update path to match your API endpoint
-        // Example: /api/open-vpn-servers/{serverId}/config
-        guard let url = URL(string: "/api/open-vpn-servers/\(serverId)/config", relativeTo: APIConfig.baseURL) else {
-            completion(.failure(NSError(domain: "OpenVpnService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid URL"])))
-            return
-        }
-        
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("text/plain", forHTTPHeaderField: "Accept") // Accept .ovpn file as text
-        
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            if let error = error {
-                completion(.failure(error))
-                return
-            }
-            
-            guard let httpResponse = response as? HTTPURLResponse else {
-                completion(.failure(NSError(domain: "OpenVpnService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid response"])))
-                return
-            }
-            
-            // Handle 401 Unauthorized
-            if httpResponse.statusCode == 401, let appState = appState {
-                Task { @MainActor in
-                    appState.refreshAccessToken { success in
-                        Task { @MainActor in
-                            if success, let newToken = appState.bearerToken {
-                                // Retry request with new token
-                                self.performConfigRequest(serverId: serverId, token: newToken, appState: appState, completion: completion)
-                            } else {
-                                completion(.failure(NSError(domain: "OpenVpnService", code: 401, userInfo: [NSLocalizedDescriptionKey: "Unauthorized"])))
-                            }
-                        }
-                    }
-                }
-                return
-            }
-            
-            guard (200...299).contains(httpResponse.statusCode) else {
-                let errorMsg = "HTTP \(httpResponse.statusCode)"
-                completion(.failure(NSError(domain: "OpenVpnService", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: errorMsg])))
-                return
-            }
-            
-            guard let data = data,
-                  let configContent = String(data: data, encoding: .utf8) else {
-                completion(.failure(NSError(domain: "OpenVpnService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to decode config"])))
-                return
-            }
-            
-            completion(.success(configContent))
-        }.resume()
-    }
     
     /// Connect to OpenVPN server using .ovpn config file (certificate-based)
     func connectToServer(

@@ -99,7 +99,12 @@ final class AppState {
                         self?.keychain.saveAccessToken(token, expiration: self?.expiration)
                     }
                     completion?(true)
-                case .failure:
+                case .failure(let error):
+                    // A client-identity rejection says nothing about the tokens: keep the session, the app needs an update.
+                    if (error as NSError).domain == ClientIdentity.errorDomain {
+                        completion?(false)
+                        return
+                    }
                     // If refresh fails, clear tokens
                     self?.logout()
                     completion?(false)
