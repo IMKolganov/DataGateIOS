@@ -46,6 +46,9 @@ targets:
           - libs/**
           - Info.plist
           - "*.entitlements"
+      # OpenVPN 3 core is mostly headers; these TUs provide OpenVPNClient + crypto helpers.
+      - path: native-openvpn3/openvpn3/client/ovpncli.cpp
+      - path: native-openvpn3/openvpn3/openvpn/crypto/data_epoch.cpp
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: imkolganov.DataGateIOS.VPNExtension
@@ -58,6 +61,7 @@ targets:
           - ASIO_STANDALONE
           - USE_MBEDTLS
           - FMT_HEADER_ONLY
+          - OPENVPN_CORE_API_VISIBILITY_HIDDEN
           - "OPENVPN_VERSION=\\\"3.11.8_datagate_ios_$(MARKETING_VERSION)\\\""
         OTHER_CPLUSPLUSFLAGS:
           - $(inherited)
