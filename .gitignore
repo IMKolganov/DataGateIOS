@@ -148,3 +148,6 @@ playground.xcworkspace
 *.xcuserstate
 *.xcuserdatad
 xcuserdata/
+build-libxray/
+.tools/
+build-deps/

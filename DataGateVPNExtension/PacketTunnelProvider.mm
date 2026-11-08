@@ -16,6 +16,9 @@
 
 #import "PacketTunnelProvider.h"
 #import "OpenVPNAdapter.h"
+#import "XrayRunnerBridge.h"
+#import "XrayConfigAssembler.h"
+#import <netdb.h>
 #import <NetworkExtension/NetworkExtension.h>
 #import <signal.h>
 #import <execinfo.h>
@@ -211,6 +214,7 @@ static void extension_loaded() {
 @property (nonatomic, strong) NSURLSession *wssSession; // Kept alive for bridge
 @property (nonatomic, strong) NSURLSessionWebSocketTask *wssTask; // Kept alive for bridge
 @property (nonatomic, strong) dispatch_queue_t wssBridgeQueue; // Queue for accept loop and bridge
+@property (nonatomic, strong) XrayRunnerBridge *xrayRunner; // Set while an Xray (VLESS) tunnel runs
 @end
 
 @implementation PacketTunnelProvider
@@ -561,6 +565,12 @@ static void extension_loaded() {
         }
         NSLog(@"✅ [PacketTunnel] Provider configuration found");
         
+        // Xray (VLESS via libXray): same providerConfiguration keys as DataGateMac.
+        if ([config[@"transportMode"] isEqual:@"xray"]) {
+            [self startXrayWithHost:config[@"server"] shareLink:config[@"xrayShareLink"] completionHandler:completionHandler];
+            return;
+        }
+
         NSString *configContent = config[@"config"];
         NSString *server = config[@"server"];
         NSNumber *port = config[@"port"];
@@ -846,6 +856,139 @@ static void extension_loaded() {
     }
 }
 
+#pragma mark - Xray (VLESS via libXray)
+
+- (void)startXrayWithHost:(NSString *)host
+                shareLink:(NSString *)shareLink
+        completionHandler:(void (^)(NSError *))completionHandler {
+    void (^fail)(NSString *, NSInteger, NSError *) = ^(NSString *message, NSInteger code, NSError *underlying) {
+        NSError *error = underlying ?: [NSError errorWithDomain:@"PacketTunnelProvider"
+                                                           code:code
+                                                       userInfo:@{NSLocalizedDescriptionKey: message}];
+        [self addLogEntry:[NSString stringWithFormat:@"Xray start failed: %@", error.localizedDescription] level:@"ERROR"];
+        [self saveLogsToUserDefaults];
+        self.lastError = error;
+        completionHandler(error);
+    };
+
+    if (![shareLink isKindOfClass:[NSString class]] || shareLink.length == 0) {
+        fail(@"Xray VLESS share link is empty. Backend config was not loaded.", 20, nil);
+        return;
+    }
+    NSString *remote = [host isKindOfClass:[NSString class]] ? host : @"";
+    [self addLogEntry:[NSString stringWithFormat:@"Xray: remote=%@ shareBytes=%lu", remote, (unsigned long)shareLink.length] level:@"INFO"];
+
+    NEPacketTunnelNetworkSettings *settings = [self xrayNetworkSettingsForRemoteHost:remote];
+    [self setTunnelNetworkSettings:settings completionHandler:^(NSError *settingsError) {
+        if (settingsError) {
+            fail(nil, 21, settingsError);
+            return;
+        }
+        int tunFd = [self packetFlowSocketFileDescriptor];
+        if (tunFd < 0) {
+            fail(@"Could not read the packet-flow utun file descriptor for Xray.", 22, nil);
+            return;
+        }
+        [self addLogEntry:[NSString stringWithFormat:@"Xray: tunnel settings applied, utun fd=%d", tunFd] level:@"INFO"];
+
+        __weak typeof(self) weakSelf = self;
+        XrayRunnerBridge *runner = [[XrayRunnerBridge alloc] initWithLogHandler:^(NSString *line) {
+            [weakSelf addLogEntry:line level:@"INFO"];
+        }];
+        self.xrayRunner = runner;
+
+        NSError *error = nil;
+        NSDictionary *shareConfig = nil;
+        if (![runner convertShareLink:shareLink outboundConfig:&shareConfig error:&error] || shareConfig == nil) {
+            fail(@"Converted Xray share link has no outbounds.", 23, error);
+            return;
+        }
+        NSString *xrayJson = [XrayConfigAssembler runtimeConfigWithShareConfig:shareConfig
+                                                             tunFileDescriptor:tunFd
+                                                                         error:&error];
+        if (xrayJson == nil) {
+            fail(@"Failed to build the Xray configuration.", 24, error);
+            return;
+        }
+        NSString *fd = [NSString stringWithFormat:@"%d", tunFd];
+        setenv("xray.tun.fd", fd.UTF8String, 1);
+        setenv("XRAY_TUN_FD", fd.UTF8String, 1);
+        if (![runner runXrayJson:xrayJson error:&error]) {
+            fail(@"libXray failed to start.", 25, error);
+            return;
+        }
+        [self addLogEntry:@"Xray: libXray runXray OK" level:@"INFO"];
+        [self saveLogsToUserDefaults];
+        self.isConnected = YES;
+        completionHandler(nil);
+    }];
+}
+
+/// NEPacketTunnelFlow's underlying utun socket (KVC, then scan like Xray-core iOS notes). -1 when not found.
+- (int)packetFlowSocketFileDescriptor {
+    @try {
+        id number = [self.packetFlow valueForKeyPath:@"socket.fileDescriptor"];
+        if ([number isKindOfClass:[NSNumber class]] && [number intValue] >= 0) {
+            return [number intValue];
+        }
+    } @catch (NSException *exception) {
+        [self addLogEntry:[NSString stringWithFormat:@"Xray: packetFlow KVC failed: %@", exception.reason] level:@"WARNING"];
+    }
+    char name[16];
+    for (int fd = 0; fd <= 1024; fd++) {
+        socklen_t len = sizeof(name);
+        memset(name, 0, sizeof(name));
+        // SYSPROTO_CONTROL = 2, UTUN_OPT_IFNAME = 2
+        if (getsockopt(fd, 2, 2, name, &len) == 0 && strncmp(name, "utun", 4) == 0) {
+            return fd;
+        }
+    }
+    return -1;
+}
+
+- (NEPacketTunnelNetworkSettings *)xrayNetworkSettingsForRemoteHost:(NSString *)remoteHost {
+    NEPacketTunnelNetworkSettings *settings = [[NEPacketTunnelNetworkSettings alloc] initWithTunnelRemoteAddress:remoteHost.length > 0 ? remoteHost : @"10.51.0.1"];
+    NEIPv4Settings *ipv4 = [[NEIPv4Settings alloc] initWithAddresses:@[@"10.51.0.2"] subnetMasks:@[@"255.255.255.0"]];
+    ipv4.includedRoutes = @[[NEIPv4Route defaultRoute]];
+    NSString *remoteIp = [self ipv4AddressForHost:remoteHost];
+    if (remoteIp.length > 0) {
+        ipv4.excludedRoutes = @[[[NEIPv4Route alloc] initWithDestinationAddress:remoteIp subnetMask:@"255.255.255.255"]];
+        [self addLogEntry:[NSString stringWithFormat:@"Xray: exclude VLESS endpoint %@/32", remoteIp] level:@"INFO"];
+    }
+    settings.IPv4Settings = ipv4;
+    NEDNSSettings *dns = [[NEDNSSettings alloc] initWithServers:@[@"1.1.1.1", @"8.8.8.8"]];
+    dns.matchDomains = @[@""];
+    settings.DNSSettings = dns;
+    settings.MTU = @1500;
+    return settings;
+}
+
+- (nullable NSString *)ipv4AddressForHost:(NSString *)host {
+    NSString *trimmed = [host stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (trimmed.length == 0) {
+        return nil;
+    }
+    struct in_addr addr;
+    if (inet_pton(AF_INET, trimmed.UTF8String, &addr) == 1) {
+        return trimmed;
+    }
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *result = NULL;
+    if (getaddrinfo(trimmed.UTF8String, NULL, &hints, &result) != 0 || result == NULL) {
+        return nil;
+    }
+    char buffer[INET_ADDRSTRLEN] = {0};
+    NSString *ip = nil;
+    if (getnameinfo(result->ai_addr, result->ai_addrlen, buffer, sizeof(buffer), NULL, 0, NI_NUMERICHOST) == 0) {
+        ip = [NSString stringWithUTF8String:buffer];
+    }
+    freeaddrinfo(result);
+    return ip;
+}
+
 - (void)startReadingPackets {
     NSLog(@"[PacketTunnel] 📥 Starting to read packets from packetFlow...");
     NSLog(@"[PacketTunnel] ⚠️ WARNING: This may conflict with OpenVPNAdapter's readPacketsWithCompletionHandler!");
@@ -899,6 +1042,11 @@ static void extension_loaded() {
     
     NSLog(@"[PacketTunnel] Stopping tunnel. Reason: %ld", (long)reason);
     
+    if (self.xrayRunner) {
+        [self.xrayRunner stopXray];
+        self.xrayRunner = nil;
+    }
+
     // Disconnect OpenVPN3
     if (self.openVPNAdapter) {
         NSLog(@"[PacketTunnel] Stopping OpenVPNAdapter...");

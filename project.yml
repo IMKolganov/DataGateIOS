@@ -63,13 +63,17 @@ targets:
           - $(SRCROOT)/native-openvpn3/openvpn3/client
           - $(SRCROOT)/DataGateVPNExtension
           - $(SRCROOT)/DataGateVPNExtension/mbedtls-include
+          - $(SRCROOT)/build-libxray
           - /opt/homebrew/include
         LIBRARY_SEARCH_PATHS:
           - $(inherited)
           - $(SRCROOT)/DataGateVPNExtension/libs
+          - $(SRCROOT)/build-libxray
         OTHER_LDFLAGS:
           - $(inherited)
           - -lc++
           - -lmbedtls
           - -lmbedx509
           - -lmbedcrypto
+          - -lXray
+          - -lresolv
