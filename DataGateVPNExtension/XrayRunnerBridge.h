@@ -2,7 +2,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// Thin wrapper around libXray `CGoInvoke` / `CGoFree` (apiVersion 1).
+/// Thin wrapper around libXray `CGoInvoke` / `CGoFree` (apiVersion 3).
 @interface XrayRunnerBridge : NSObject
 
 - (instancetype)init NS_UNAVAILABLE;

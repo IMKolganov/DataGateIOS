@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-GO_VERSION="${DATAGATE_GO_VERSION:-1.26.3}"
+GO_VERSION="${DATAGATE_GO_VERSION:-1.27.3}"
 ARCH="$(uname -m)"
 case "$ARCH" in
   arm64) GO_ARCH=arm64 ;;

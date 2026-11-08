@@ -2,7 +2,7 @@
 //  XrayRunnerBridge.m
 //  DataGateVPNExtension
 //
-//  Same libXray CGoInvoke wrapper as DataGateMac (apiVersion 1).
+//  Same libXray CGoInvoke wrapper as DataGateMac (apiVersion 3).
 //
 
 #import "XrayRunnerBridge.h"
@@ -36,7 +36,7 @@ static NSString *const kXrayRunnerErrorDomain = @"XrayRunnerBridge";
                                 payload:(nullable NSDictionary *)payload
                                   error:(NSError * _Nullable * _Nullable)error {
     NSMutableDictionary *request = [NSMutableDictionary dictionary];
-    request[@"apiVersion"] = @1;
+    request[@"apiVersion"] = @3;
     request[@"method"] = method;
     if (payload != nil) {
         request[@"payload"] = payload;
@@ -172,8 +172,8 @@ static NSString *const kXrayRunnerErrorDomain = @"XrayRunnerBridge";
 
 - (BOOL)runXrayJson:(NSString *)xrayJson error:(NSError * _Nullable * _Nullable)error {
     NSError *invokeError = nil;
-    NSDictionary *data = [self invokeMethod:@"runXrayFromJson"
-                                    payload:@{@"configJSON": xrayJson ?: @""}
+    NSDictionary *data = [self invokeMethod:@"runXray"
+                                    payload:@{@"xrayJson": xrayJson ?: @""}
                                       error:&invokeError];
     if (data == nil) {
         if (error != NULL) {

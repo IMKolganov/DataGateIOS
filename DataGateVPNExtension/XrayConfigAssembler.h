@@ -14,7 +14,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (class, nonatomic, readonly) NSInteger socksListenPort;
 
-/// Runtime Xray JSON for libXray `runXrayFromJson`. `tunFileDescriptor` < 0 means no TUN inbound.
+/// Runtime Xray JSON for libXray `runXray`. `tunFileDescriptor` < 0 means no TUN inbound.
 + (nullable NSString *)runtimeConfigWithShareConfig:(NSDictionary *)shareConfig
                                   tunFileDescriptor:(int)tunFileDescriptor
                                               error:(NSError * _Nullable * _Nullable)error;

@@ -14,7 +14,7 @@ if [[ ! -d "$LIBXRAY/cgo_bridge" ]]; then
   exit 1
 fi
 if [[ ! -x "$GO_ROOT/bin/go" ]]; then
-  echo "Go toolchain not found at $GO_ROOT (need 1.26.3+ for libXray). Install with: scripts/bootstrap-go.sh" >&2
+  echo "Go toolchain not found at $GO_ROOT (need 1.27.3+ for libXray). Install with: scripts/bootstrap-go.sh" >&2
   exit 1
 fi
 
