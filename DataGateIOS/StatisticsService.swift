@@ -5,6 +5,7 @@
 
 import Foundation
 
+@MainActor
 final class StatisticsService {
     static let shared = StatisticsService()
     private let baseURL = APIConfig.baseURL

@@ -6,6 +6,7 @@
 import Foundation
 import NetworkExtension
 
+@MainActor
 final class OpenVpnService {
     static let shared = OpenVpnService()
     private let client = APIClient.shared
