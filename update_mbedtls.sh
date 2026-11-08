@@ -33,7 +33,7 @@ git submodule update --init --recursive
 export IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 export IOS_CC=$(xcrun --sdk iphoneos --find clang)
 export IOS_CXX=$(xcrun --sdk iphoneos --find clang++)
-export IOS_CFLAGS="-arch arm64 -isysroot ${IOS_SDK} -miphoneos-version-min=17.0 -fembed-bitcode"
+export IOS_CFLAGS="-arch arm64 -isysroot ${IOS_SDK} -miphoneos-version-min=17.0"
 export IOS_CXXFLAGS="${IOS_CFLAGS}"
 
 echo "🔨 Building mbedTLS for iOS arm64 using CMake..."

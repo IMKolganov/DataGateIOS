@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, develop, 'sync/**']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Tools
+        run: brew install xcodegen asio fmt cmake
+
+      - name: Select newest Xcode
+        run: |
+          XCODE="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          echo "Using $XCODE"
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
+
+      - name: Native deps
+        run: |
+          mkdir -p DataGateVPNExtension/libs
+          ./update_mbedtls.sh
+
+      - name: Generate project
+        run: |
+          cp DataGateIOS/Config.example.plist DataGateIOS/Config.plist
+          xcodegen generate
+          pod install
+
+      - name: Build (device, unsigned)
+        run: |
+          rc=0
+          xcodebuild build \
+            -workspace DataGateIOS.xcworkspace \
+            -scheme DataGateIOS \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO > build.log 2>&1 || rc=$?
+          grep -E 'error:|\*\* BUILD' build.log | head -100
+          exit $rc
