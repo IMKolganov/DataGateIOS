@@ -37,6 +37,8 @@ targets:
   DataGateVPNExtension:
     type: app-extension
     platform: iOS
+    dependencies:
+      - sdk: NetworkExtension.framework
     sources:
       - path: DataGateVPNExtension
         excludes:
