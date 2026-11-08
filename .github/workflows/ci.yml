@@ -29,6 +29,9 @@ jobs:
           mkdir -p DataGateVPNExtension/libs
           ./update_mbedtls.sh
 
+      - name: Test VPN configuration contracts
+        run: bash scripts/test-vpn-config.sh
+
       - name: Build libXray (iOS arm64)
         run: |
           scripts/bootstrap-go.sh

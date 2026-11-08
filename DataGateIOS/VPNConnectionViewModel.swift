@@ -70,7 +70,7 @@ final class VPNConnectionViewModel {
         isConnecting = false
     }
     
-    /// Connect using config from server: getBest → ensureAndDownloadDeviceFile (by CN) → connect with WSS.
+    /// Select a supported server, issue its device profile, and start OpenVPN-over-WSS or Xray.
     func connectWithServerConfig(appState: AppState) async {
         guard !isConnecting else { return }
         isConnecting = true
@@ -103,6 +103,7 @@ final class VPNConnectionViewModel {
                         print("[VPN] ensureAndDownloadDeviceFile: vpnServerId=\(best.serverId), commonName=\(commonName)")
                         OpenVpnService.shared.ensureAndDownloadDeviceFile(
                             vpnServerId: best.serverId,
+                            serverType: best.serverType,
                             commonName: commonName,
                             externalId: externalId,
                             issuedTo: issuedTo,

@@ -54,8 +54,11 @@ final class VPNManager {
         serverPort: Int,
         protocolType: String = "udp",
         ovpnConfigContent: String,
-        wssUrl: String? = nil
+        wssUrl: String? = nil,
+        xrayShareLink: String? = nil
     ) async throws {
+        // Validate the profile before removing or saving any existing VPN preferences.
+        let xrayProfile = try xrayShareLink.map { try XrayClientProfile(content: $0) }
         // Remove only OUR VPN configurations (DataGate VPN) to avoid duplicates
         // This does NOT remove other VPN apps' configurations
         let existingManagers = try? await NETunnelProviderManager.loadAllFromPreferences()
@@ -91,8 +94,12 @@ final class VPNManager {
             "port": serverPort,
             "protocol": protocolType
         ]
+        if let xrayProfile {
+            providerConfig = xrayProfile.providerConfiguration
+            protocolConfig.serverAddress = "\(xrayProfile.host):\(xrayProfile.port)"
+        }
         // Optional: for WSS mode, pass wssUrl so the extension connects via WebSocket to backend
-        if let wssUrl = wssUrl, !wssUrl.isEmpty {
+        if xrayProfile == nil, let wssUrl = wssUrl, !wssUrl.isEmpty {
             providerConfig["wssUrl"] = wssUrl
             providerConfig["useWSS"] = true
             print("[VPN] Extension providerConfig: wssUrl=\(wssUrl), useWSS=true, server=127.0.0.1:\(serverPort)")

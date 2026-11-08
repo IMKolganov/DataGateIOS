@@ -3,11 +3,11 @@
 </p>
 
 <h1 align="center">DataGate</h1>
-<p align="center"><strong>iOS VPN client — OpenVPN over WebSocket Secure (WSS)</strong></p>
+<p align="center"><strong>iOS VPN client — OpenVPN TCP over WSS and Xray/VLESS</strong></p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/platform-iOS%2017%2B-blue?logo=apple" alt="iOS 17+" />
-  <img src="https://img.shields.io/badge/Swift-5.9-orange?logo=swift" alt="Swift 5.9" />
+  <img src="https://img.shields.io/badge/Swift-6.2-orange?logo=swift" alt="Swift 6.2" />
   <img src="https://img.shields.io/badge/OpenVPN-WSS-green" alt="OpenVPN over WSS" />
 </p>
 
@@ -15,10 +15,10 @@
 
 ## What is this?
 
-**DataGate** is a native iOS app that connects to your VPN backend and establishes an **OpenVPN** tunnel. Traffic is carried over **WebSocket Secure (WSS)** from the device to your server, which then forwards it to the real OpenVPN server. That lets you run OpenVPN behind HTTPS/WSS (e.g. nginx) and avoid direct UDP/TCP to the VPN port.
+**DataGate** is a native iOS app that connects to your VPN backend and establishes an **OpenVPN TCP-over-WSS** or **Xray/VLESS** tunnel. The app selects an online server supported by iOS and allowed by the user's quota plan from the v3 server list, then issues and downloads the matching device profile.
 
 - **App** gets config and WSS URL from your API, manages auth (e.g. Google Sign-In) and UI.
-- **Network Extension** runs the OpenVPN core and a local TCP↔WSS bridge inside the system tunnel process.
+- **Network Extension** runs either the OpenVPN core with a local TCP↔WSS bridge or libXray with the supplied VLESS share link.
 
 Details: [OpenVPN over WSS — Architecture](WSS_OPENVPN_ARCHITECTURE.md).
 
@@ -26,7 +26,8 @@ Details: [OpenVPN over WSS — Architecture](WSS_OPENVPN_ARCHITECTURE.md).
 
 | Feature | Description |
 |--------|-------------|
-| **OpenVPN over WSS** | Tunnel traffic over WebSocket Secure; no direct VPN port exposure. |
+| **OpenVPN TCP over WSS** | Tunnel traffic over WebSocket Secure; no direct VPN port exposure. UDP-over-WSS is not supported on iOS. |
+| **Xray/VLESS** | Download a client link from the backend and run it through libXray in the packet tunnel. |
 | **Google Sign-In** | Optional OAuth login; token used for API and VPN config. |
 | **Server list (Access)** | View VPN servers and status from your backend. |
 | **Statistics** | Overview series and traffic stats from your API. |
@@ -35,8 +36,8 @@ Details: [OpenVPN over WSS — Architecture](WSS_OPENVPN_ARCHITECTURE.md).
 ## Requirements
 
 - **iOS 17.0+**
-- **Xcode 15+**
-- **Swift 5.9+**
+- **Xcode 26+**
+- **Swift 6.2+**
 - **CMake** (for building mbedTLS), e.g. `brew install cmake`
 
 ## Setup
@@ -44,7 +45,7 @@ Details: [OpenVPN over WSS — Architecture](WSS_OPENVPN_ARCHITECTURE.md).
 ### 1. Clone and open
 
 ```bash
-git clone <repo-url>
+git clone --recurse-submodules <repo-url>
 cd DataGateIOS
 ```
 
@@ -80,9 +81,26 @@ The script will:
 
 `DataGateVPNExtension/libs/` is in `.gitignore`; each developer runs the script locally.
 
-### 4. Build in Xcode
+### 4. Build libXray and check VPN configuration
 
-Open `DataGateIOS.xcodeproj`, select the **DataGateIOS** scheme and a device or simulator, then build (⌘B).
+```bash
+scripts/bootstrap-go.sh
+scripts/build-libxray-ios.sh
+bash scripts/test-vpn-config.sh
+```
+
+The native libraries are built for an arm64 iOS device.
+
+### 5. Generate and build in Xcode
+
+```bash
+brew install xcodegen asio fmt cmake
+xcodegen generate
+pod install
+open DataGateIOS.xcworkspace
+```
+
+Select the **DataGateIOS** scheme and a device, then build (⌘B).
 
 ## Project layout
 

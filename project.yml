@@ -59,6 +59,10 @@ targets:
           - USE_MBEDTLS
           - FMT_HEADER_ONLY
           - "OPENVPN_VERSION=\\\"3_datagate_ios_$(MARKETING_VERSION)\\\""
+        OTHER_CPLUSPLUSFLAGS:
+          - $(inherited)
+          - -include
+          - fmt/format.h
         HEADER_SEARCH_PATHS:
           - $(inherited)
           - $(SRCROOT)/native-openvpn3/openvpn3

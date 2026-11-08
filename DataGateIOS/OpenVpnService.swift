@@ -37,11 +37,9 @@ final class OpenVpnService {
         appState: AppState?,
         completion: @escaping (Result<OpenVpnServerWithStatusesResponse, Error>) -> Void
     ) {
-        // Stays on v1 on purpose: the backend's v1 list hides Xray and UDP OpenVPN servers, and this app can only
-        // run OpenVPN TCP over WSS. Move to /api/v3/open-vpn-servers/get-all-with-status (like Android) once it
-        // supports UDP-over-WSS and Xray, filtering by serverType / isAccessibleForUserQuotaPlan.
+        // v3 exposes both Xray and OpenVPN; BestServerResult filters unsupported and quota-denied rows.
         client.request(
-            path: "/api/open-vpn-servers/get-all-with-status",
+            path: "/api/v3/open-vpn-servers/get-all-with-status",
             method: "GET",
             body: nil as (any Encodable)?,
             authToken: token,
@@ -70,7 +68,7 @@ final class OpenVpnService {
         )
     }
     
-    /// Picks best server locally from get-all-with-status: min countConnectedClients among online WSS servers (matches Android).
+    /// Pick the least-loaded online server supported by this app and allowed by the user's quota plan.
     func getBest(
         authToken: String,
         appState: AppState? = nil,
@@ -80,12 +78,12 @@ final class OpenVpnService {
             switch result {
             case .success(let response):
                 let candidates = response.openVpnServerWithStatuses.compactMap { BestServerResult.from($0) }
-                print("[VPN] getBest: \(candidates.count) WSS server(s), choosing by min countConnectedClients")
+                print("[VPN] getBest: \(candidates.count) supported server(s), choosing by min countConnectedClients")
                 if let best = candidates.min(by: { $0.countConnectedClients < $1.countConnectedClients }) {
                     print("[VPN] Best server selected: id=\(best.serverId), name=\(best.name ?? "?"), apiUrl=\(best.apiUrl ?? "?"), countConnectedClients=\(best.countConnectedClients)")
                     completion(.success(best))
                 } else {
-                    completion(.failure(NSError(domain: "OpenVpnService", code: -1, userInfo: [NSLocalizedDescriptionKey: "No servers with WSS available. The app connects only to servers that have WSS (nginx) enabled. Enable WSS on at least one server in the backend."])))
+                    completion(.failure(NSError(domain: "OpenVpnService", code: -1, userInfo: [NSLocalizedDescriptionKey: "No online Xray or OpenVPN TCP-over-WSS servers are available for your plan."])))
                 }
             case .failure(let error):
                 completion(.failure(error))
@@ -93,14 +91,12 @@ final class OpenVpnService {
         }
     }
     
-    // MARK: - OVPN file by CN (matches Android: download-file-by-cn, add-with-token)
-    
-    private static let pathDownloadFileByCn = "/api/open-vpn-files/download-file-by-cn"
-    private static let pathAddWithToken = "/api/open-vpn-files/add-with-token"
+    // MARK: - Device profiles by CN (OpenVPN files or Xray client links)
     
     /// Ensures device config exists: try download by CN; if missing, create via add-with-token then download again. Matches Android ensureAndDownloadDeviceFile.
     func ensureAndDownloadDeviceFile(
         vpnServerId: Int,
+        serverType: VpnServerType = .openVpn,
         commonName: String,
         externalId: String,
         issuedTo: String,
@@ -109,7 +105,7 @@ final class OpenVpnService {
         completion: @escaping (Result<OvpnDownloadResult, Error>) -> Void
     ) {
         func run(with token: String) {
-            tryDownloadFileByCn(vpnServerId: vpnServerId, commonName: commonName, token: token) { [weak self] result in
+            tryDownloadFileByCn(vpnServerId: vpnServerId, serverType: serverType, commonName: commonName, token: token) { [weak self] result in
                 switch result {
                 case .success(let optionalFile):
                     if let file = optionalFile {
@@ -118,11 +114,11 @@ final class OpenVpnService {
                         return
                     }
                     print("[VPN] ensureAndDownloadDeviceFile: config not found (404), creating via add-with-token...")
-                    self?.createFileOnServer(vpnServerId: vpnServerId, commonName: commonName, externalId: externalId, issuedTo: issuedTo, token: token, appState: appState) { createResult in
+                    self?.createFileOnServer(vpnServerId: vpnServerId, serverType: serverType, commonName: commonName, externalId: externalId, issuedTo: issuedTo, token: token, appState: appState) { createResult in
                         switch createResult {
                         case .success:
                             print("[VPN] ensureAndDownloadDeviceFile: create OK, downloading again...")
-                            self?.tryDownloadFileByCn(vpnServerId: vpnServerId, commonName: commonName, token: token) { secondResult in
+                            self?.tryDownloadFileByCn(vpnServerId: vpnServerId, serverType: serverType, commonName: commonName, token: token) { secondResult in
                                 switch secondResult {
                                 case .success(let file?):
                                     print("[VPN] ensureAndDownloadDeviceFile: second download OK")
@@ -160,6 +156,7 @@ final class OpenVpnService {
     /// POST download-file-by-cn. Success(nil) = file not found (404 or 400 "not found").
     private func tryDownloadFileByCn(
         vpnServerId: Int,
+        serverType: VpnServerType,
         commonName: String,
         token: String,
         completion: @escaping (Result<OvpnDownloadResult?, Error>) -> Void
@@ -168,7 +165,7 @@ final class OpenVpnService {
             let vpnServerId: Int
             let commonName: String
         }
-        guard let url = URL(string: Self.pathDownloadFileByCn, relativeTo: APIConfig.baseURL) else {
+        guard let url = URL(string: serverType.filesBasePath + "/download-file-by-cn", relativeTo: APIConfig.baseURL) else {
             completion(.failure(NSError(domain: "OpenVpnService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid URL"])))
             return
         }
@@ -222,7 +219,8 @@ final class OpenVpnService {
                         completion(.failure(NSError(domain: "OpenVpnService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid base64 content"])))
                         return
                     }
-                    let fileName = payload.issuedOvpn?.fileName ?? "client.ovpn"
+                    let fileName = payload.fileName ?? payload.issuedOvpn?.fileName ?? payload.issuedXray?.fileName
+                        ?? (serverType == .xray ? "client.json" : "client.ovpn")
                     completion(.success(OvpnDownloadResult(fileName: fileName, content: decoded, contentType: contentType)))
                 } catch {
                     completion(.failure(error))
@@ -233,6 +231,7 @@ final class OpenVpnService {
     
     private func createFileOnServer(
         vpnServerId: Int,
+        serverType: VpnServerType,
         commonName: String,
         externalId: String,
         issuedTo: String,
@@ -246,7 +245,7 @@ final class OpenVpnService {
             let externalId: String
             let issuedTo: String
         }
-        guard let url = URL(string: Self.pathAddWithToken, relativeTo: APIConfig.baseURL) else {
+        guard let url = URL(string: serverType.filesBasePath + "/add-with-token", relativeTo: APIConfig.baseURL) else {
             completion(.failure(NSError(domain: "OpenVpnService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid URL"])))
             return
         }
@@ -278,7 +277,7 @@ final class OpenVpnService {
                                 completion(.failure(NSError(domain: "OpenVpnService", code: 401, userInfo: [NSLocalizedDescriptionKey: "Unauthorized"])))
                                 return
                             }
-                            service?.createFileOnServer(vpnServerId: vpnServerId, commonName: commonName, externalId: externalId, issuedTo: issuedTo, token: newToken, appState: appState, completion: completion)
+                            service?.createFileOnServer(vpnServerId: vpnServerId, serverType: serverType, commonName: commonName, externalId: externalId, issuedTo: issuedTo, token: newToken, appState: appState, completion: completion)
                         }
                     }
                 }
@@ -317,9 +316,23 @@ final class OpenVpnService {
     /// Port for WSS bridge: TCP server in extension listens here; OpenVPN config uses remote 127.0.0.1 thisPort. Must match Android BRIDGE_PORT (41194).
     private static let wssBridgePort = 41194
 
-    /// Connect using config obtained from server (getBest + ensureAndDownloadDeviceFile).
-    /// Patches config for WSS (remote 127.0.0.1:bridgePort, proto tcp-client) and passes wssUrl to extension.
+    /// Connect using the issued Xray link or patch the OpenVPN profile for the local WSS bridge.
     func connectWithDownloadedConfig(best: BestServerResult, ovpnContent: Data) async throws {
+        if best.serverType == .xray {
+            guard let text = String(data: ovpnContent, encoding: .utf8) else {
+                throw XrayClientProfile.ProfileError.invalidShareLink
+            }
+            let profile = try XrayClientProfile(content: text)
+            try await vpnManager.configureVPN(
+                serverAddress: profile.host,
+                serverPort: profile.port,
+                protocolType: "tcp",
+                ovpnConfigContent: "",
+                xrayShareLink: profile.shareLink
+            )
+            try await vpnManager.connect()
+            return
+        }
         guard let apiUrl = best.apiUrl, !apiUrl.isEmpty else {
             print("[VPN] connectWithDownloadedConfig failed: best server has no apiUrl")
             throw NSError(domain: "OpenVpnService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Best server has no apiUrl"])
@@ -327,6 +340,9 @@ final class OpenVpnService {
         let wssUrl = httpsToWssProxy(apiUrl)
         print("[VPN] WSS proxy URL: \(wssUrl) (from apiUrl: \(apiUrl))")
         let configText = String(data: ovpnContent, encoding: .utf8) ?? ""
+        if configText.range(of: #"(?im)^\s*proto\s+udp\S*"#, options: .regularExpression) != nil {
+            throw NSError(domain: "OpenVpnService", code: -1, userInfo: [NSLocalizedDescriptionKey: "This OpenVPN server uses UDP-over-WSS, which is not supported on iOS yet."])
+        }
         let patchedConfig = forceWssConfig(original: configText)
         let bridgePort = Self.wssBridgePort
         print("[VPN] Config patched for WSS: remote 127.0.0.1:\(bridgePort), proto tcp-client. Config size: \(patchedConfig.count) chars")

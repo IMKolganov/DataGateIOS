@@ -110,6 +110,12 @@ struct ServerRowView: View {
                 
                 Text(server.openVpnServerResponses.openVpnServer.serverName)
                     .font(AppTypography.headline)
+
+                if server.openVpnServerResponses.openVpnServer.serverType == .xray {
+                    Text("Xray")
+                        .font(AppTypography.caption)
+                        .foregroundStyle(.secondary)
+                }
                 
                 Spacer()
                 
@@ -129,7 +135,7 @@ struct ServerRowView: View {
                     LabeledContent("Connected clients:", value: "\(server.countConnectedClients)")
                     LabeledContent("Sessions:", value: "\(server.countSessions)")
                     LabeledContent("Uptime:", value: formatUptime(from: status.upSinceParsed))
-                    LabeledContent("OpenVPN version:", value: status.version)
+                    LabeledContent(server.openVpnServerResponses.openVpnServer.serverType == .xray ? "Xray version:" : "OpenVPN version:", value: status.version)
                     LabeledContent("Bytes In:", value: formatBytes(server.totalBytesIn))
                     LabeledContent("Bytes Out:", value: formatBytes(server.totalBytesOut))
                 }
